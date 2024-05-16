@@ -50,7 +50,7 @@ function run_organization() {
   $mod_command log runs add $workingdir $workingdir/runs.zip --last-run --organization "$org_name"
   # Saving results to artifactory
   curl -XPUT \
-    --user $ARTIFACTORY_USERNAME:$ARTIFACTORY_PASSWORD \
+    --user $ARTIFACTORY_USER:$ARTIFACTORY_PASSWORD \
     --upload-file $workingdir/runs.zip \
     --fail \
     $ARTIFACTORY_UPLOAD_URL/$org_encoded/$id/runs.zip \
