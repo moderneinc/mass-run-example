@@ -1,0 +1,5 @@
+.moderne/
+.idea/
+.git-credentials
+workingdir/
+**/clone.log

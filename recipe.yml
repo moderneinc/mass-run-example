@@ -1,0 +1,6 @@
+---
+type: specs.openrewrite.org/v1beta/recipe
+name: io.moderne.RecipeList
+description: Recipe List
+recipeList:
+  - org.openrewrite.staticanalysis.CommonStaticAnalysis:
