@@ -16,7 +16,9 @@ function generate_random_id(){
 }
 
 function run() {
-  #$mod_command config recipes moderne sync
+  # Install recipes
+  $mod_command config recipes moderne sync
+  # Install recipe list yaml, containing the recipes we want to run
   $mod_command config recipes yaml install recipe.yml
   while IFS= read -r line; do
       # Check if the line resembles an organization name pattern
@@ -34,16 +36,19 @@ function run() {
 
 function run_organization() {
   local org_name="$1"
+  # Encode the organization name for use in paths and urls
   local org_encoded="$(perl -MURI::Escape -e '$input=$ARGV[0];$input=~s/ /_/g; print uri_escape(lc($input));' "$org_name")"
   echo "Running org: $org_name ($org_encoded)"
+  # Prepare working environment
   id=$(generate_random_id)
   local workingdir="workingdir/$org_encoded/$id"
   mkdir -p $workingdir
+  # Running commands
   $mod_command git clone moderne $workingdir "$org_name" --metadata
   $mod_command build $workingdir
   $mod_command run $workingdir --recipe $recipe_id
   $mod_command log runs add $workingdir $workingdir/runs.zip --last-run --organization "$org_name"
-
+  # Saving results to artifactory
   curl -XPUT \
     --user $ARTIFACTORY_USERNAME:$ARTIFACTORY_PASSWORD \
     --upload-file $workingdir/runs.zip \
