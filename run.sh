@@ -16,8 +16,10 @@ function generate_random_id(){
 }
 
 function run() {
-  # Install recipes
-  $mod_command config recipes moderne sync
+  # Install all known recipes
+  # $mod_command config recipes moderne sync
+  # Install a specific recipe
+  $mod_command config recipes jar install org.openrewrite.recipe:rewrite-static-analysis:LATEST
   # Install recipe list yaml, containing the recipes we want to run
   $mod_command config recipes yaml install recipe.yml
   while IFS= read -r line; do
