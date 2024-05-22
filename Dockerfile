@@ -32,7 +32,7 @@ ARG MODERNE_TENANT=app
 # Personal access token for Moderne; can be created through https://<tenant>.moderne.io/settings/access-token
 ARG MODERNE_TOKEN
 # We recommend a dedicated Artifactory Maven repository, allowing both releases & snapshots; supply the full URL here
-ARG ARTIFACTORY_DOWNLOAD_URL=https://artifactory.moderne.internal/artifactory/moderne-ingest
+ARG ARTIFACTORY_DOWNLOAD_URL
 ARG ARTIFACTORY_USER
 ARG ARTIFACTORY_PASSWORD
 
