@@ -27,7 +27,7 @@ ADD grafana-run-dashboard.json /etc/grafana/dashboards/run.json
 ADD prometheus.yml /etc/prometheus/prometheus.yml
 
 FROM dependencies AS modcli
-ARG MODERNE_CLI_VERSION=3.7.1
+ARG MODERNE_CLI_VERSION=3.7.3
 ARG MODERNE_TENANT=app
 # Personal access token for Moderne; can be created through https://<tenant>.moderne.io/settings/access-token
 ARG MODERNE_TOKEN
@@ -54,13 +54,13 @@ RUN cpan install URI::Escape
 
 # Configure git credentials if they are required to clone; ensure this lines up with your use of https:// or ssh://
 # .git-credentials each line defines credentilas for a host in the format: https://username:password@host
-#ADD .git-credentials /root/.git-credentials
-#RUN git config --global credential.helper store --file=/root/.git-credentials
-#RUN git config --global http.sslVerify false
+ADD .git-credentials /root/.git-credentials
+RUN git config --global credential.helper store --file=/root/.git-credentials
+RUN git config --global http.sslVerify false
 
 # Configure trust store if self-signed certificates are in use for artifact repository, source control, or moderne tenant
-#COPY ${TRUSTED_CERTIFICATES_PATH} /usr/lib/jvm/temurin-17-jdk/lib/security/cacerts
-#RUN java -jar mod.jar config http trust-store edit java-home
+COPY ${TRUSTED_CERTIFICATES_PATH} /usr/lib/jvm/temurin-17-jdk/lib/security/cacerts
+RUN java -jar mod.jar config http trust-store edit java-home
 
 FROM modcli AS runner
 EXPOSE 8080
