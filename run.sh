@@ -15,6 +15,27 @@ function generate_random_id(){
   echo $random_id
 }
 
+function runAllOrganisations() {
+  while IFS= read -r line; do
+        # Check if the line resembles an organization name pattern
+        if [[ "$line" =~ ^[[:space:]]*[[:graph:]].*\([0-9]+\)$ ]]; then
+            # Extract the organization name excluding repo count
+            org_name=$(echo "$line" | sed -E 's/\s*\([0-9]+\)$//' | xargs)
+
+            # Check if the extracted organization name is not empty
+            if [ -n "$org_name" ]; then
+                run_organization "$org_name"
+            fi
+        fi
+    done < <($mod_command config moderne organizations show)
+}
+
+function runListedOrganisations() {
+    while IFS= read -r org; do
+        run_organization "$org"
+    done < organization-list.txt
+}
+
 function run() {
   # Install all known recipes
   # $mod_command config recipes moderne sync
@@ -22,18 +43,9 @@ function run() {
   $mod_command config recipes jar install org.openrewrite.recipe:rewrite-static-analysis:LATEST
   # Install recipe list yaml, containing the recipes we want to run
   $mod_command config recipes yaml install recipe.yml
-  while IFS= read -r line; do
-      # Check if the line resembles an organization name pattern
-      if [[ "$line" =~ ^[[:space:]]*[[:graph:]].*\([0-9]+\)$ ]]; then
-          # Extract the organization name excluding repo count
-          org_name=$(echo "$line" | sed -E 's/\s*\([0-9]+\)$//' | xargs)
-
-          # Check if the extracted organization name is not empty
-          if [ -n "$org_name" ]; then
-              run_organization "$org_name"
-          fi
-      fi
-  done < <($mod_command config moderne organizations show)
+  # Uncomment/comment the following lines to run on all organizations or only listed organizations
+  # runAllOrganisations
+  runListedOrganisations
 }
 
 function run_organization() {
