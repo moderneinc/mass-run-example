@@ -69,6 +69,7 @@ ADD supervisord.conf /etc/supervisord.conf
 WORKDIR /app
 ADD run.sh run.sh
 ADD recipe.yml recipe.yml
+ADD organization-list.txt organization-list.txt
 RUN chmod +x run.sh
 
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisord.conf"]
