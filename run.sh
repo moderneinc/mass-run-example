@@ -54,14 +54,7 @@ function run_organization() {
   # Running commands
   $mod_command git clone moderne $workingdir "$org_name" --metadata
   $mod_command build $workingdir
-
-  while IFS= read -r runParams; do
-    echo "Running: mod run $workingdir $runParams"
-    bash -c "$mod_command run $workingdir $runParams"
-  done < run-parameters.txt
-
-  echo "Running: mod devcenter $workingdir --output-dir $workingdir"
-  $mod_command devcenter $workingdir --output-dir $workingdir
+  $mod_command devcenter run $workingdir --output-dir $workingdir
   # Saving results to artifactory
   curl -XPUT \
     --user $ARTIFACTORY_USER:$ARTIFACTORY_PASSWORD \
