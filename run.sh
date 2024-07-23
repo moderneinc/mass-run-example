@@ -13,7 +13,7 @@ function generate_random_id(){
   echo $random_id
 }
 
-function runAllOrganisations() {
+function runAllOrganizations() {
   while IFS= read -r line; do
         # Check if the line resembles an organization name pattern
         if [[ "$line" =~ ^[[:space:]]*[[:graph:]].*\([0-9]+\)$ ]]; then
@@ -28,7 +28,7 @@ function runAllOrganisations() {
     done < <($mod_command config moderne organizations show)
 }
 
-function runListedOrganisations() {
+function runListedOrganizations() {
     while IFS= read -r org; do
         run_organization "$org"
     done < organization-list.txt
@@ -38,8 +38,8 @@ function run() {
   # Install all known recipes
   $mod_command config recipes moderne sync
   # Uncomment/comment the following lines to run on all organizations or only listed organizations
-  # runAllOrganisations
-  runListedOrganisations
+  # runAllOrganizations
+  runListedOrganizations
 }
 
 function run_organization() {
