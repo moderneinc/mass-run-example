@@ -6,6 +6,8 @@ if [ -z "$mod_command" ]; then
   mod_command="java -jar mod.jar"
 fi
 
+recipe_id="io.moderne.RecipeList"
+
 function generate_random_id(){
   timestamp=$(date +%Y%m%d%H%M%S)
   local random_string=$(openssl rand -base64 8 | tr -dc 'a-zA-Z0-9' | fold -w 10 | head -n 1)
@@ -36,7 +38,11 @@ function runListedOrganizations() {
 
 function run() {
   # Install all known recipes
-  $mod_command config recipes moderne sync
+  # $mod_command config recipes moderne sync
+  # Install a specific recipe
+  $mod_command config recipes jar install org.openrewrite.recipe:rewrite-static-analysis:LATEST
+  # Install recipe list yaml, containing the recipes we want to run
+  $mod_command config recipes yaml install recipe.yml
   # Uncomment/comment the following lines to run on all organizations or only listed organizations
   # runAllOrganizations
   runListedOrganizations
@@ -54,18 +60,14 @@ function run_organization() {
   # Running commands
   $mod_command git clone moderne $workingdir "$org_name" --metadata
   $mod_command build $workingdir
-  $mod_command devcenter run $workingdir --output-dir $workingdir
+  $mod_command run $workingdir --recipe $recipe_id
+  $mod_command log runs add $workingdir $workingdir/runs.zip --last-run --organization "$org_name"
   # Saving results to artifactory
   curl -XPUT \
     --user $ARTIFACTORY_USER:$ARTIFACTORY_PASSWORD \
-    --upload-file $workingdir/devcenter.xlsx \
+    --upload-file $workingdir/runs.zip \
     --fail \
-    $ARTIFACTORY_UPLOAD_URL/$org_encoded/$id/devcenter.xlsx
-  curl -XPUT \
-      --user $ARTIFACTORY_USER:$ARTIFACTORY_PASSWORD \
-      --upload-file $workingdir/devcenter.html \
-      --fail \
-      $ARTIFACTORY_UPLOAD_URL/$org_encoded/$id/devcenter.html
+    $ARTIFACTORY_UPLOAD_URL/$org_encoded/$id/runs.zip \
 
   rm -rf $workingdir
 }
