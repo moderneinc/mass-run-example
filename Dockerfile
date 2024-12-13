@@ -6,7 +6,7 @@ FROM prom/prometheus as prometheus
 
 # Install dependencies for `mod` cli
 FROM jdk17 AS dependencies
-RUN apt-get update && apt-get install -y git supervisor perl build-essential
+RUN apt-get update && apt-get install -y git supervisor perl build-essential maven
 
 # Install a JDK
 COPY --from=jdk17 /opt/java/openjdk /usr/lib/jvm/temurin-17-jdk
@@ -27,7 +27,7 @@ ADD grafana-run-dashboard.json /etc/grafana/dashboards/run.json
 ADD prometheus.yml /etc/prometheus/prometheus.yml
 
 FROM dependencies AS modcli
-ARG MODERNE_CLI_VERSION=3.7.3
+ARG MODERNE_CLI_VERSION=LATEST
 ARG MODERNE_TENANT=app
 # Personal access token for Moderne; can be created through https://<tenant>.moderne.io/settings/access-token
 ARG MODERNE_TOKEN
@@ -45,7 +45,7 @@ ARG TRUSTED_CERTIFICATES_PATH
 
 WORKDIR /app
 # Download the CLI and connect it to your instance of Moderne, and your own Artifactory
-RUN curl --insecure --request GET --url https://repo1.maven.org/maven2/io/moderne/moderne-cli/${MODERNE_CLI_VERSION}/moderne-cli-${MODERNE_CLI_VERSION}.jar --output mod.jar
+RUN mvn dependency:get -Dartifact=io.moderne:moderne-cli:$MODERNE_CLI_VERSION && mvn dependency:copy -Dartifact=io.moderne:moderne-cli:$MODERNE_CLI_VERSION -DoutputDirectory=. && mv moderne-cli*.jar mod.jar
 RUN java -jar mod.jar config moderne edit --token=${MODERNE_TOKEN} https://${MODERNE_TENANT}.moderne.io
 RUN java -jar mod.jar config lsts artifacts artifactory edit ${ARTIFACTORY_DOWNLOAD_URL} --user ${ARTIFACTORY_USER} --password ${ARTIFACTORY_PASSWORD}
 
