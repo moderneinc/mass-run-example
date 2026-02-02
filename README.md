@@ -1,85 +1,329 @@
 # Mass Run
 
-This example demonstrates how to use the [Moderne CLI](https://docs.moderne.io/user-documentation/moderne-cli/getting-started/cli-intro) to run recipes on all organizations (collection of repositories) using the Moderne platform.
+Run [OpenRewrite](https://docs.openrewrite.org/) recipes across repositories at scale using the [Moderne CLI](https://docs.moderne.io/user-documentation/moderne-cli/getting-started/cli-intro).
 
-## Step 1: Customize the Docker image
+## Overview
 
-Begin by copying the [provided Dockerfile](/Dockerfile) to your environment or cloning this entire repository.
+This container executes recipes against pre-built LSTs (Lossless Semantic Trees) and produces:
+- **Data tables** - Structured analysis results from the recipe
+- **Patches** - Code changes that can be applied to repositories
+- **Logs** - Detailed execution logs for debugging
 
-From there, we will modify it depending on your organizational needs. Please note that the process requires access to several of your internal systems to function correctly. This includes your source control system, your artifact repository, and your Moderne tenant or DX instance.
+Optionally, it can automatically create pull requests for any code changes.
 
-### Self-Signed Certificates
+## Quick Start
 
-If your internal services (artifact repository, source control, or the Moderne tenant) are accessed:
+```bash
+# Build the image
+docker build -t mass-run:latest \
+    --build-arg MODERNE_LICENSE_KEY=<license-key> \
+    .
 
-* Over HTTPS and they require [SSL/TLS](https://en.wikipedia.org/wiki/Transport_Layer_Security), but have certificates signed by a trusted-by-default root Certificate Authority.
-* Over HTTP (never requiring SSL/TLS)
-
-Please comment out the following lines from your Dockerfile:
-
-```Dockerfile
-# Configure trust store if self-signed certificates are in use for artifact repository, source control, or moderne tenant
-COPY ${TRUSTED_CERTIFICATES_PATH} /usr/lib/jvm/temurin-17-jdk/lib/security/cacerts
+# Run a recipe
+docker run \
+    -e REPOS_CSV_LOCATION=s3://my-bucket/repos.csv \
+    -e RECIPES_CSV_LOCATION=s3://my-bucket/recipes.csv \
+    -e RECIPE=org.openrewrite.java.dependencies.DependencyVulnerabilityCheck \
+    -e OUTPUT_LOCATION=s3://my-bucket/output \
+    mass-run:latest
 ```
 
-If your internal services, instead, use self-signed certs, you will need to configure the CLI and JVMs installed within the Docker image to trust your organization's self-signed certificate:
+---
 
-When invoking, Docker, supply the `TRUSTED_CERTIFICATES_PATH` argument pointing to an appropriate [cacerts file](https://www.ibm.com/docs/en/sdk-java-technology/8?topic=certificate-cacerts-certificates-file).
+## Build Arguments
 
-If you are not sure where to get a suitable cacerts file, you can check out your local machine as you probably have one there. On JDK 8, you can find your cacerts file within its installation directory under `jre/lib/security/cacerts`. On newer JDK versions, you can find your cacerts file within is installation directory under `lib/security/cacerts`.
+| Argument              | Required | Description                                    |
+|-----------------------|----------|------------------------------------------------|
+| `MODERNE_LICENSE_KEY` | Yes      | License key for the Moderne CLI                |
+| `MODERNE_CLI_VERSION` | No       | CLI version to use (default: `LATEST`)         |
+| `GH_HOST`             | No       | GitHub Enterprise hostname (if not github.com) |
 
-### Artifact repository
+---
 
-The CLI needs access to artifact repositories to download the LSTs which we will run recipes on. This is configured via the `ARTIFACTORY_DOWNLOAD_URL`, `ARTIFACTORY_UPLOAD_URL`, `ARTIFACTORY_USER`, and `ARTIFACTORY_PASSWORD` [arguments in the Dockerfile](/Dockerfile#L35-L37).
+## Environment Variables
 
-`ARTIFACTORY_DOWNLOAD_URL` should point to where the LSTs are stored.
-`ARTIFACTORY_UPLOAD_URL` should point to where you want the run logs to be uploaded.
+### Required
+
+| Variable              | Description                                                        |
+|-----------------------|--------------------------------------------------------------------|
+| `REPOS_CSV_LOCATION`  | Path or S3 URL to repos.csv (defines repositories to run against)  |
+| `RECIPE`              | Recipe ID to run (e.g., `org.openrewrite.java.search.FindTypes`)   |
+| `OUTPUT_LOCATION`     | S3 path for output (e.g., `s3://bucket/output`)                    |
+
+### Optional
+
+| Variable               | Description                                               |
+|------------------------|-----------------------------------------------------------|
+| `RECIPES_CSV_LOCATION` | Path or S3 URL to recipes.csv (defines available recipes) |
+| `ORGANIZATION`         | Organization name for syncing repos                       |
+| `RECIPE_OPTIONS`       | Recipe options (e.g., `-Pfoo=bar -Pbaz=bop`)              |
+
+### PR Creation
+
+| Variable         | Description                                                  |
+|------------------|--------------------------------------------------------------|
+| `CREATE_PRS`     | Set to `true` to create PRs (default: `false`)               |
+| `PR_TITLE`       | Title for created PRs                                        |
+| `PR_BODY`        | Body text for created PRs                                    |
+| `BRANCH_NAME`    | Branch name for changes (default: `moderne/<recipe-suffix>`) |
+| `COMMIT_MESSAGE` | Commit message for changes                                   |
+
+**Note:** SCM credentials for PR creation are read from `.git-credentials` (see [Source Control Credentials](#source-control-credentials)).
+
+### S3 Authentication
+
+For S3 or S3-compatible storage (like Minio), configure these environment variables:
+
+| Variable                | Description                                            |
+|-------------------------|--------------------------------------------------------|
+| `AWS_ACCESS_KEY_ID`     | AWS access key (or Minio access key)                   |
+| `AWS_SECRET_ACCESS_KEY` | AWS secret key (or Minio secret key)                   |
+| `S3_ENDPOINT`           | S3-compatible endpoint URL (e.g., `http://minio:9000`) |
+| `S3_REGION`             | AWS region (optional, for cross-region access)         |
+| `S3_PROFILE`            | AWS profile name (optional, for named profiles)        |
+
+---
+
+## CSV File Formats
+
+### repos.csv
+
+Defines the repositories to run recipes against. See the [repos.csv documentation](https://docs.moderne.io/user-documentation/moderne-cli/references/repos-csv/).
+
+```csv
+cloneUrl,branch,org,repo,...
+https://github.com/org/repo.git,main,org,repo,...
+https://bitbucket.example.com/scm/PROJECT/repo.git,develop,PROJECT,repo,...
+```
+
+The `branch` column is used as the target branch when creating PRs.
+
+### recipes.csv
+
+Defines the available recipes that can be run. See the [recipes.csv documentation](https://docs.moderne.io/user-documentation/moderne-cli/references/recipes-csv/).
+
+---
+
+## Output
+
+Results are uploaded to `OUTPUT_LOCATION/<timestamp>/`:
+
+| File              | Description                                |
+|-------------------|--------------------------------------------|
+| `data-tables.zip` | Data tables (CSV/TSV) generated by recipe  |
+| `patches.zip`     | Fix patches for repositories               |
+| `logs.zip`        | Run logs for debugging                     |
+| `summary.txt`     | Run summary with recipe and repo count     |
+
+---
+
+## PR Creation
+
+When `CREATE_PRS=true`, the container:
+
+1. Identifies repositories with code changes (those with `fix.patch` files)
+2. Clones full source for only those repositories
+3. Creates a branch, applies changes, commits, and pushes
+4. Creates PRs via:
+   - **GitHub**: `gh` CLI
+   - **Bitbucket Data Center**: REST API
+
+The SCM type is auto-detected from the repository's clone URL. Credentials are read from `.git-credentials`.
+
+---
+
+## Configuration
 
 ### Source Control Credentials
 
-Most source control systems require authentication to access their repositories. If your source control **does not** require authentication to `git clone` repositories, comment out the [following lines](/Dockerfile#L35-L36):
-
-```Dockerfile
-ADD .git-credentials /root/.git-credentials
-RUN git config --global credential.helper store --file=/root/.git-credentials
-```
-
-In the more common scenario that your source control does require authentication, you will need to create and include a `.git-credentials` file. You will want to supply the credentials for a service account with access to all repositories.
-
-Each line of the `.git-credentials` file specifies the `username` and plaintext `password` for a particular `host` in the format:
+Most source control systems require authentication. Create a `.git-credentials` file with credentials for each SCM host:
 
 ```
-https://username:password@host
+https://username:token@github.com
+https://username:token@bitbucket.example.com
+https://username:token@gitlab.internal.com
 ```
 
-For example:
-
-```
-https://sambsnyd:likescats@github.com
-```
-
-### Moderne Tenant or DX instance
-
-Connection to a Moderne tenant allows the CLI to list LSTs for downloading and get information about your organization. The `MODERNE_TENANT` and `MODERNE_TOKEN` arguments are required to connect to a Moderne tenant.
-
-If you are connecting to a Moderne DX instance, you will need to provide the token it was configured to accept on startup. If you are connecting to a Moderne tenant, you will need to create and use a [Moderne personal access token](https://docs.moderne.io/user-documentation/moderne-platform/how-to-guides/create-api-access-tokens).
-
-## Step 3: Build the Docker image
-
-Once you've customized the `Dockerfile` as needed, you can build the image with the following command, filling in your organization's specific values for the build arguments:
+Mount this file at runtime (recommended for security):
 
 ```bash
-docker build -t moderne-mass-run:latest \
-    --build-arg MODERNE_TENANT=<> \
-    --build-arg MODERNE_TOKEN=<> \
-    --build-arg TRUSTED_CERTIFICATES_PATH=<> \
-    --build-arg ARTIFACTORY_DOWNLOAD_URL=<> \
-    --build-arg ARTIFACTORY_UPLOAD_URL=<> \
-    --build-arg ARTIFACTORY_USER=<> \
-    --build-arg ARTIFACTORY_PASSWORD=<> \
-    .
+docker run \
+    -v /path/to/.git-credentials:/root/.git-credentials:ro \
+    ...
 ```
 
-## Step 4: Deploy and run the image
+**Format:** Each line is `https://username:password@host` or `https://username:token@host`
 
-Now that you have a Docker image built, you will need to deploy it to the container management platform of your choice and have it run on a schedule. We will leave this as an exercise for the reader as there are many platforms and options for running this.
+**Note:** Use a service account with read access to all repositories. For GitHub, use a Personal Access Token (PAT) as the password.
+
+### Self-Signed Certificates
+
+If your services use self-signed certificates, import the certificate into each JDK's trust store. The container includes JDKs 8, 11, 17, 21, and 25. Uncomment and modify the relevant section in the Dockerfile:
+
+```dockerfile
+COPY mycert.crt /root/mycert.crt
+RUN /usr/lib/jvm/temurin-8-jdk/bin/keytool -import -noprompt -storepass changeit -file /root/mycert.crt -keystore /usr/lib/jvm/temurin-8-jdk/jre/lib/security/cacerts
+RUN /usr/lib/jvm/temurin-11-jdk/bin/keytool -import -noprompt -storepass changeit -file /root/mycert.crt -keystore /usr/lib/jvm/temurin-11-jdk/lib/security/cacerts
+RUN /usr/lib/jvm/temurin-17-jdk/bin/keytool -import -noprompt -storepass changeit -file /root/mycert.crt -keystore /usr/lib/jvm/temurin-17-jdk/lib/security/cacerts
+RUN /usr/lib/jvm/temurin-21-jdk/bin/keytool -import -noprompt -storepass changeit -file /root/mycert.crt -keystore /usr/lib/jvm/temurin-21-jdk/lib/security/cacerts
+RUN /usr/lib/jvm/temurin-25-jdk/bin/keytool -import -noprompt -storepass changeit -file /root/mycert.crt -keystore /usr/lib/jvm/temurin-25-jdk/lib/security/cacerts
+RUN java -jar mod.jar config http trust-store edit java-home
+```
+
+Skip this section if using trusted CAs or HTTP.
+
+---
+
+## Monitoring
+
+The container includes built-in monitoring via `mod monitor`, Prometheus, and Grafana.
+
+| Port | Service     | Description                           |
+|------|-------------|---------------------------------------|
+| 8080 | mod monitor | Prometheus metrics (`/prometheus`)    |
+| 9090 | Prometheus  | Metrics collection and querying       |
+| 3000 | Grafana     | Dashboards (credentials: admin/admin) |
+
+```
+┌───────────────────────────────────────────────────────────┐
+│                        Container                          │
+│                                                           │
+│  ┌─────────────┐   ┌────────────┐   ┌─────────────────┐  │
+│  │ mod monitor │──►│ Prometheus │──►│     Grafana     │  │
+│  │    :8080    │   │   :9090    │   │      :3000      │  │
+│  └─────────────┘   └────────────┘   └─────────────────┘  │
+│         ▲                                                 │
+│         │                                                 │
+│  ┌──────┴──────┐                                         │
+│  │   run.sh    │                                         │
+│  └─────────────┘                                         │
+└───────────────────────────────────────────────────────────┘
+```
+
+### Disabling Monitoring
+
+To run without monitoring, remove the Grafana and Prometheus sections from:
+- `Dockerfile` - Remove `FROM grafana/grafana`, `FROM prom/prometheus`, and related COPY/ADD lines
+- `entrypoint.sh` - Remove the Prometheus and Grafana startup commands
+
+---
+
+## Deployment Examples
+
+### ECS Task Definition
+
+```json
+{
+  "family": "mass-run",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "4096",
+  "memory": "30720",
+  "containerDefinitions": [
+    {
+      "name": "mass-run",
+      "image": "your-ecr-repo/mass-run:latest",
+      "essential": true,
+      "environment": [
+        {"name": "REPOS_CSV_LOCATION", "value": "s3://your-bucket/repos.csv"},
+        {"name": "RECIPES_CSV_LOCATION", "value": "s3://your-bucket/recipes.csv"},
+        {"name": "RECIPE", "value": "org.openrewrite.java.dependencies.DependencyVulnerabilityCheck"},
+        {"name": "OUTPUT_LOCATION", "value": "s3://your-bucket/output"},
+        {"name": "CREATE_PRS", "value": "false"}
+      ],
+      "mountPoints": [
+        {
+          "sourceVolume": "git-credentials",
+          "containerPath": "/root/.git-credentials",
+          "readOnly": true
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/mass-run",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "mass-run"
+        }
+      }
+    }
+  ],
+  "volumes": [
+    {
+      "name": "git-credentials",
+      "efsVolumeConfiguration": {
+        "fileSystemId": "fs-xxxx",
+        "rootDirectory": "/git-credentials"
+      }
+    }
+  ]
+}
+```
+
+**Note:** For ECS, store `.git-credentials` in EFS or use AWS Secrets Manager with a sidecar container to write the file.
+
+### Local Docker Run
+
+```bash
+docker run \
+    -p 3000:3000 -p 9090:9090 -p 8080:8080 \
+    -v /path/to/.git-credentials:/root/.git-credentials:ro \
+    -e REPOS_CSV_LOCATION=/data/repos.csv \
+    -e RECIPES_CSV_LOCATION=/data/recipes.csv \
+    -e RECIPE=org.openrewrite.java.search.FindTypes \
+    -e RECIPE_OPTIONS="-PfullyQualifiedTypeName=org.springframework.boot.SpringApplication" \
+    -e OUTPUT_LOCATION=/output \
+    -v /path/to/repos.csv:/data/repos.csv \
+    -v /path/to/recipes.csv:/data/recipes.csv \
+    -v /path/to/output:/output \
+    mass-run:latest
+```
+
+### With PR Creation
+
+```bash
+docker run \
+    -v /path/to/.git-credentials:/root/.git-credentials:ro \
+    -e REPOS_CSV_LOCATION=s3://bucket/repos.csv \
+    -e RECIPES_CSV_LOCATION=s3://bucket/recipes.csv \
+    -e RECIPE=org.openrewrite.java.migrate.UpgradeToJava21 \
+    -e OUTPUT_LOCATION=s3://bucket/output \
+    -e CREATE_PRS=true \
+    -e PR_TITLE="Upgrade to Java 21" \
+    -e PR_BODY="Automated migration to Java 21 using OpenRewrite" \
+    mass-run:latest
+```
+
+### With Minio (Local S3-Compatible Storage)
+
+First, start Minio locally:
+
+```bash
+docker run -d \
+    -p 9000:9000 -p 9001:9001 \
+    --name minio \
+    -e MINIO_ROOT_USER=minioadmin \
+    -e MINIO_ROOT_PASSWORD=minioadmin \
+    minio/minio server /data --console-address ":9001"
+```
+
+Create a bucket and upload your CSV files via the Minio console at http://localhost:9001 or using the `mc` CLI.
+
+Then run mass-run with Minio:
+
+```bash
+docker run \
+    --network host \
+    -v /path/to/.git-credentials:/root/.git-credentials:ro \
+    -e AWS_ACCESS_KEY_ID=minioadmin \
+    -e AWS_SECRET_ACCESS_KEY=minioadmin \
+    -e S3_ENDPOINT=http://localhost:9000 \
+    -e REPOS_CSV_LOCATION=s3://mass-run/repos.csv \
+    -e RECIPES_CSV_LOCATION=s3://mass-run/recipes.csv \
+    -e RECIPE=org.openrewrite.java.search.FindTypes \
+    -e RECIPE_OPTIONS="-PfullyQualifiedTypeName=java.util.List" \
+    -e OUTPUT_LOCATION=s3://mass-run/output \
+    mass-run:latest
+```
+
+**Note:** Use `--network host` so the container can reach Minio on localhost. Alternatively, use Docker Compose to put both containers on the same network.
