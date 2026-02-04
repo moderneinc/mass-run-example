@@ -19,6 +19,7 @@ TARGET_BRANCH="$2"
 # Formats supported:
 #   https://bitbucket.example.com/scm/PROJECT/repo.git
 #   ssh://git@bitbucket.example.com/PROJECT/repo.git
+#   ssh://git@bitbucket.example.com:7999/PROJECT/repo.git
 #   https://bitbucket.example.com/projects/PROJECT/repos/repo
 #   git@bitbucket.example.com:PROJECT/repo.git
 
@@ -26,30 +27,46 @@ BB_HOST=""
 BB_PROJECT=""
 BB_REPO=""
 
-if echo "$ORIGIN_URL" | grep -q "/scm/"; then
+# Try each URL format in order of specificity
+if echo "$ORIGIN_URL" | grep -qE "^https?://[^/]+/scm/[^/]+/"; then
     # Format: https://host/scm/PROJECT/repo.git
     BB_HOST=$(echo "$ORIGIN_URL" | sed -E 's|^(https?://[^/]+)/.*|\1|')
-    BB_PROJECT=$(echo "$ORIGIN_URL" | sed -E 's|.*/scm/([^/]+)/.*|\1|')
-    BB_REPO=$(echo "$ORIGIN_URL" | sed -E 's|.*/([^/]+)\.git$|\1|')
-elif echo "$ORIGIN_URL" | grep -q "/projects/"; then
+    BB_PROJECT=$(echo "$ORIGIN_URL" | sed -E 's|^https?://[^/]+/scm/([^/]+)/.*|\1|')
+    BB_REPO=$(echo "$ORIGIN_URL" | sed -E 's|^https?://[^/]+/scm/[^/]+/([^/]+)(\.git)?$|\1|')
+elif echo "$ORIGIN_URL" | grep -qE "^https?://[^/]+/projects/[^/]+/repos/"; then
     # Format: https://host/projects/PROJECT/repos/repo
     BB_HOST=$(echo "$ORIGIN_URL" | sed -E 's|^(https?://[^/]+)/.*|\1|')
-    BB_PROJECT=$(echo "$ORIGIN_URL" | sed -E 's|.*/projects/([^/]+)/.*|\1|')
-    BB_REPO=$(echo "$ORIGIN_URL" | sed -E 's|.*/repos/([^/]+).*|\1|')
-elif echo "$ORIGIN_URL" | grep -q "ssh://"; then
+    BB_PROJECT=$(echo "$ORIGIN_URL" | sed -E 's|^https?://[^/]+/projects/([^/]+)/.*|\1|')
+    BB_REPO=$(echo "$ORIGIN_URL" | sed -E 's|^https?://[^/]+/projects/[^/]+/repos/([^/]+).*|\1|')
+elif echo "$ORIGIN_URL" | grep -qE "^ssh://[^@]+@[^/]+/[^/]+/"; then
     # SSH format: ssh://git@host/PROJECT/repo.git or ssh://git@host:port/PROJECT/repo.git
-    BB_HOST=$(echo "$ORIGIN_URL" | sed -E 's|ssh://[^@]+@([^:/]+).*|https://\1|')
-    BB_PROJECT=$(echo "$ORIGIN_URL" | sed -E 's|ssh://[^@]+@[^/]+/([^/]+)/.*|\1|')
-    BB_REPO=$(echo "$ORIGIN_URL" | sed -E 's|.*/([^/]+)\.git$|\1|')
-elif echo "$ORIGIN_URL" | grep -q "@.*:"; then
+    # Also handles: ssh://git@host:port/scm/PROJECT/repo.git
+    # Extract host (may include port), then remove port for API URL
+    host_with_port=$(echo "$ORIGIN_URL" | sed -E 's|^ssh://[^@]+@([^/]+)/.*|\1|')
+    host_only=$(echo "$host_with_port" | sed -E 's|:.*||')
+    BB_HOST="https://$host_only"
+    # Strip /scm/ prefix from path if present (some BB installations include it in SSH URLs)
+    ssh_path=$(echo "$ORIGIN_URL" | sed -E 's|^ssh://[^@]+@[^/]+/||')
+    ssh_path=$(echo "$ssh_path" | sed -E 's|^scm/||')
+    BB_PROJECT=$(echo "$ssh_path" | sed -E 's|([^/]+)/.*|\1|')
+    BB_REPO=$(echo "$ssh_path" | sed -E 's|[^/]+/([^/]+)(\.git)?$|\1|')
+elif echo "$ORIGIN_URL" | grep -qE "^[^@]+@[^:]+:[^/]+/"; then
     # Git format: git@host:PROJECT/repo.git
-    BB_HOST=$(echo "$ORIGIN_URL" | sed -E 's|[^@]+@([^:]+):.*|https://\1|')
-    BB_PROJECT=$(echo "$ORIGIN_URL" | sed -E 's|[^@]+@[^:]+:([^/]+)/.*|\1|')
-    BB_REPO=$(echo "$ORIGIN_URL" | sed -E 's|.*/([^/]+)\.git$|\1|')
+    BB_HOST=$(echo "$ORIGIN_URL" | sed -E 's|^[^@]+@([^:]+):.*|https://\1|')
+    BB_PROJECT=$(echo "$ORIGIN_URL" | sed -E 's|^[^@]+@[^:]+:([^/]+)/.*|\1|')
+    BB_REPO=$(echo "$ORIGIN_URL" | sed -E 's|^[^@]+@[^:]+:[^/]+/([^/]+)(\.git)?$|\1|')
 fi
+
+# Remove .git suffix if present
+BB_REPO="${BB_REPO%.git}"
 
 if [ -z "$BB_HOST" ] || [ -z "$BB_PROJECT" ] || [ -z "$BB_REPO" ]; then
     echo "  ERROR: Could not parse Bitbucket URL: $ORIGIN_URL"
+    echo "  Expected formats:"
+    echo "    https://host/scm/PROJECT/repo.git"
+    echo "    https://host/projects/PROJECT/repos/repo"
+    echo "    ssh://git@host/PROJECT/repo.git"
+    echo "    git@host:PROJECT/repo.git"
     exit 1
 fi
 
@@ -61,7 +78,7 @@ AUTH_HEADER=""
 if [ -n "$CRED_PASS" ]; then
     if [ -n "$CRED_USER" ]; then
         # Username:password format - use basic auth
-        AUTH_HEADER="Authorization: Basic $(echo -n "$CRED_USER:$CRED_PASS" | base64)"
+        AUTH_HEADER="Authorization: Basic $(echo -n "$CRED_USER:$CRED_PASS" | base64 | tr -d '\n')"
         echo "  Auth: Using .git-credentials (basic auth)"
     else
         # Token-only format - try as bearer token
@@ -74,23 +91,23 @@ else
     exit 1
 fi
 
-# Create PR payload
-PR_PAYLOAD=$(cat <<EOF
-{
-    "title": "${PR_TITLE:-Automated changes}",
-    "description": "${PR_BODY:-This PR was created automatically.}",
-    "fromRef": {
-        "id": "refs/heads/$BRANCH_NAME"
-    },
-    "toRef": {
-        "id": "refs/heads/$TARGET_BRANCH"
-    }
-}
-EOF
-)
+# Build PR payload using jq for proper JSON escaping
+# This handles special characters, quotes, newlines safely
+PR_PAYLOAD=$(jq -n \
+    --arg title "${PR_TITLE:-Automated changes}" \
+    --arg description "${PR_BODY:-This PR was created automatically.}" \
+    --arg fromRef "refs/heads/$BRANCH_NAME" \
+    --arg toRef "refs/heads/$TARGET_BRANCH" \
+    '{
+        title: $title,
+        description: $description,
+        fromRef: { id: $fromRef },
+        toRef: { id: $toRef }
+    }')
 
 echo "  Creating Bitbucket PR..."
-PR_RESPONSE=$(curl -s -X POST \
+# shellcheck disable=SC2086
+PR_RESPONSE=$(curl -s --connect-timeout 10 --max-time 30 ${CURL_SSL_OPTS:-} -X POST \
     -H "$AUTH_HEADER" \
     -H "Content-Type: application/json" \
     -d "$PR_PAYLOAD" \

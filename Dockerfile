@@ -1,131 +1,213 @@
+################################################################################
+# CORE SETUP
+################################################################################
+
 FROM eclipse-temurin:8-jdk AS jdk8
 FROM eclipse-temurin:11-jdk AS jdk11
 FROM eclipse-temurin:17-jdk AS jdk17
 FROM eclipse-temurin:21-jdk AS jdk21
 FROM eclipse-temurin:25-jdk AS jdk25
 
-# Import Grafana and Prometheus for monitoring
-FROM grafana/grafana as grafana
-FROM prom/prometheus as prometheus
-
 # Install dependencies for the Moderne CLI
 FROM jdk25 AS dependencies
-RUN apt-get update && apt-get install -y git build-essential maven curl unzip jq zip
+RUN apt-get update && apt-get install -y curl git git-lfs jq libxml2-utils unzip wget zip vim && git lfs install
 
-# Install JDKs (multiple versions for mod exec compatibility)
+# Gather various JDK versions (for mod exec compatibility)
 COPY --from=jdk8 /opt/java/openjdk /usr/lib/jvm/temurin-8-jdk
 COPY --from=jdk11 /opt/java/openjdk /usr/lib/jvm/temurin-11-jdk
 COPY --from=jdk17 /opt/java/openjdk /usr/lib/jvm/temurin-17-jdk
 COPY --from=jdk21 /opt/java/openjdk /usr/lib/jvm/temurin-21-jdk
 COPY --from=jdk25 /opt/java/openjdk /usr/lib/jvm/temurin-25-jdk
 
-# Import Grafana and Prometheus into the image
-COPY --from=grafana /usr/share/grafana /usr/share/grafana
-COPY --from=grafana /etc/grafana /etc/grafana
-COPY --from=prometheus /bin/prometheus /bin/prometheus
-COPY --from=prometheus /etc/prometheus /etc/prometheus
-
-# Copy configs for prometheus and grafana
-ADD grafana-datasource.yml /etc/grafana/provisioning/datasources/grafana-datasource.yml
-ADD grafana-dashboard.yml /etc/grafana/provisioning/dashboards/grafana-dashboard.yml
-ADD grafana-build-dashboard.json /etc/grafana/dashboards/build.json
-ADD grafana-run-dashboard.json /etc/grafana/dashboards/run.json
-ADD prometheus.yml /etc/prometheus/prometheus.yml
+################################################################################
+# MODERNE CLI SETUP
+################################################################################
 
 FROM dependencies AS modcli
 
-# =============================================================================
-# BUILD ARGUMENTS
-# =============================================================================
-ARG MODERNE_CLI_VERSION=LATEST
-
-# License key for the Moderne CLI
-ARG MODERNE_LICENSE_KEY
-
-# GitHub Enterprise host (for gh CLI, if not using github.com)
-ARG GH_HOST
+# Build arguments for CLI version selection
+# MODERNE_CLI_STAGE: "stable" (default) or "staging"
+# MODERNE_CLI_VERSION: specific version (e.g., "3.50.0"), overrides MODERNE_CLI_STAGE
+ARG MODERNE_CLI_STAGE=stable
+ARG MODERNE_CLI_VERSION
+ENV MODERNE_CLI_VERSION=${MODERNE_CLI_VERSION}
 
 WORKDIR /app
 
 # Download the Moderne CLI
-RUN mvn dependency:get -Dartifact=io.moderne:moderne-cli:$MODERNE_CLI_VERSION \
-    && mvn dependency:copy -Dartifact=io.moderne:moderne-cli:$MODERNE_CLI_VERSION -DoutputDirectory=. \
-    && mv moderne-cli*.jar mod.jar
-
-# Warm up the CLI by running a version check (downloads lazy-loaded components)
-RUN java -jar mod.jar --version
-
-# Configure license key
-RUN if [ -n "$MODERNE_LICENSE_KEY" ]; then java -jar mod.jar config license edit ${MODERNE_LICENSE_KEY}; fi
-
-# Configure git to use credential store
-# Mount .git-credentials at runtime: -v /path/to/.git-credentials:/root/.git-credentials:ro
-RUN git config --global credential.helper store --file=/root/.git-credentials
-RUN git config --global http.sslVerify false
-
-# Install GitHub CLI for PR creation
-# See: https://github.com/cli/cli/blob/trunk/docs/install_linux.md
-RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
-    && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
-    && apt-get update && apt-get install -y gh
-
-# Install AWS CLI for S3 access (architecture-aware)
-# See: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html
-RUN ARCH=$(uname -m) && \
-    if [ "$ARCH" = "aarch64" ]; then \
-        AWS_CLI_URL="https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip"; \
+# Priority: MODERNE_CLI_VERSION > MODERNE_CLI_STAGE
+# Air-gapped: pre-download the jar and use COPY instead:
+# COPY moderne-cli.jar /usr/local/bin/mod.jar
+RUN if [ -n "${MODERNE_CLI_VERSION}" ]; then \
+        echo "Downloading version: ${MODERNE_CLI_VERSION}"; \
+        curl -f -s --insecure --request GET --url "https://repo1.maven.org/maven2/io/moderne/moderne-cli/${MODERNE_CLI_VERSION}/moderne-cli-${MODERNE_CLI_VERSION}.jar" --output /usr/local/bin/mod.jar; \
+    elif [ "${MODERNE_CLI_STAGE}" = "staging" ]; then \
+        LATEST_VERSION=$(curl -f -s --insecure --request GET --url "https://api.github.com/repos/moderneinc/moderne-cli-releases/releases" | jq '.[0].tag_name' -r | sed "s/^v//"); \
+        if [ -z "${LATEST_VERSION}" ]; then \
+            echo "Failed to get latest staging version"; \
+            exit 1; \
+        fi; \
+        echo "Downloading latest staging version: ${LATEST_VERSION}"; \
+        curl -f -s --insecure --request GET --url "https://repo1.maven.org/maven2/io/moderne/moderne-cli/${LATEST_VERSION}/moderne-cli-${LATEST_VERSION}.jar" --output /usr/local/bin/mod.jar; \
     else \
-        AWS_CLI_URL="https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"; \
+        LATEST_VERSION=$(curl -f -s --insecure --request GET --url "https://api.github.com/repos/moderneinc/moderne-cli-releases/releases/latest" | jq '.tag_name' -r | sed "s/^v//"); \
+        if [ -z "${LATEST_VERSION}" ]; then \
+            echo "Failed to get latest stable version"; \
+            exit 1; \
+        fi; \
+        echo "Downloading latest stable version: ${LATEST_VERSION}"; \
+        curl -f -s --insecure --request GET --url "https://repo1.maven.org/maven2/io/moderne/moderne-cli/${LATEST_VERSION}/moderne-cli-${LATEST_VERSION}.jar" --output /usr/local/bin/mod.jar; \
+    fi
+
+# Create mod wrapper script (same pattern as mass-ingest)
+RUN echo -e '#!/bin/sh\njava -jar /usr/local/bin/mod.jar "$@"' > /usr/local/bin/mod && \
+    chmod +x /usr/local/bin/mod
+
+# Verify mod CLI is working
+RUN mod --version
+
+################################################################################
+# OPTIONAL: Language Support (uncomment as needed)
+################################################################################
+# Most projects use Maven/Gradle wrappers and don't need these installations.
+# Uncomment only if your repositories specifically require them for mod exec.
+
+FROM modcli AS language-support
+
+# Gradle (uncomment if projects don't use Gradle without a wrapper)
+# RUN wget --no-check-certificate https://services.gradle.org/distributions/gradle-8.14-bin.zip
+# RUN mkdir /opt/gradle
+# RUN unzip -d /opt/gradle gradle-8.14-bin.zip
+# ENV PATH="${PATH}:/opt/gradle/gradle-8.14/bin"
+
+# Maven (uncomment if projects don't use Maven without a wrapper)
+# ENV MAVEN_VERSION=3.9.11
+# RUN wget --no-check-certificate https://repo1.maven.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz && tar xzvf apache-maven-${MAVEN_VERSION}-bin.tar.gz && rm apache-maven-${MAVEN_VERSION}-bin.tar.gz
+# RUN mv apache-maven-${MAVEN_VERSION} /opt/apache-maven-${MAVEN_VERSION}
+# RUN ln -s /opt/apache-maven-${MAVEN_VERSION}/bin/mvn /usr/local/bin/mvn
+
+# Node.js (uncomment for JavaScript/TypeScript projects)
+# RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
+#     apt-get install -y --no-install-recommends nodejs
+
+# Python 3.11 (uncomment for Python projects)
+# RUN apt-get update && apt-get install -y software-properties-common \
+#     && add-apt-repository ppa:deadsnakes/ppa && apt-get update \
+#     && apt-get install -y python3.11 python3.11-venv python3.11-dev
+# RUN python3.11 -m ensurepip --upgrade && python3.11 -m pip install --upgrade pip
+
+# .NET SDK (uncomment for .NET projects)
+# RUN apt-get install -y dotnet-sdk-8.0
+
+################################################################################
+# AWS CLI (for S3 access)
+################################################################################
+
+FROM language-support AS tools
+
+# Install AWS CLI for S3 operations (architecture-aware)
+RUN ARCH=$(uname -m) && \
+    if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then \
+        curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"; \
+    else \
+        curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"; \
     fi && \
-    curl "$AWS_CLI_URL" -o "awscliv2.zip" \
-    && unzip awscliv2.zip \
-    && ./aws/install \
-    && rm -rf awscliv2.zip aws
+    unzip awscliv2.zip && \
+    ./aws/install && \
+    rm -rf awscliv2.zip aws
 
-# Set GitHub Enterprise host if provided
-ENV GH_HOST=${GH_HOST}
+################################################################################
+# RUNTIME CONFIGURATION
+################################################################################
 
-FROM modcli AS runner
+FROM tools AS runner
 
-# Expose ports: 8080 for mod monitor metrics, 3000 for Grafana, 9090 for Prometheus
-EXPOSE 8080 3000 9090
+# Git authentication configuration
+# Credentials are configured at runtime via volume mounts (not baked into image)
+RUN git config --global credential.helper "store --file=/root/.git-credentials"
+
+# Mount git credentials at runtime with:
+# docker run -v $(pwd)/.git-credentials:/root/.git-credentials:ro ...
+#
+# .git-credentials format (one line per host):
+# https://<username>:<password>@github.com
+# https://<token-name>:<token>@bitbucket.example.com
+
+# Optional: Disable SSL verification (uncomment if needed)
+# RUN git config --global http.sslVerify false
+
+################################################################################
+# OPTIONAL: Self-signed Certificates (uncomment if needed)
+################################################################################
+# Only needed if your artifact repository, source control, or Moderne tenant
+# uses self-signed certificates.
+
+# COPY mycert.crt /root/mycert.crt
+# RUN /usr/lib/jvm/temurin-8-jdk/bin/keytool -import -noprompt -storepass changeit -file /root/mycert.crt -keystore /usr/lib/jvm/temurin-8-jdk/jre/lib/security/cacerts
+# RUN /usr/lib/jvm/temurin-11-jdk/bin/keytool -import -noprompt -storepass changeit -file /root/mycert.crt -keystore /usr/lib/jvm/temurin-11-jdk/lib/security/cacerts
+# RUN /usr/lib/jvm/temurin-17-jdk/bin/keytool -import -noprompt -storepass changeit -file /root/mycert.crt -keystore /usr/lib/jvm/temurin-17-jdk/lib/security/cacerts
+# RUN /usr/lib/jvm/temurin-21-jdk/bin/keytool -import -noprompt -storepass changeit -file /root/mycert.crt -keystore /usr/lib/jvm/temurin-21-jdk/lib/security/cacerts
+# RUN /usr/lib/jvm/temurin-25-jdk/bin/keytool -import -noprompt -storepass changeit -file /root/mycert.crt -keystore /usr/lib/jvm/temurin-25-jdk/lib/security/cacerts
+# RUN mod config http trust-store edit java-home
+
+# Optional: Configure wget for self-signed certificates
+# RUN echo "ca_certificate=/root/mycert.crt" >> /root/.wgetrc
+
+# Configure JVM options for LST processing
+RUN mod config java options edit "-Xmx4g -Xss3m"
+
+################################################################################
+# FINAL SETUP
+################################################################################
 
 WORKDIR /app
-ADD run.sh run.sh
-ADD entrypoint.sh entrypoint.sh
-ADD pr-scripts/ pr-scripts/
-RUN chmod +x run.sh entrypoint.sh pr-scripts/*.sh
+
+# Copy scripts
+COPY --chmod=755 run.sh run.sh
+COPY --chmod=755 pr-scripts/ pr-scripts/
+
+# Expose mod CLI monitor port
+EXPOSE 8080
+
+# Disable extra formatting in logs
+ENV CUSTOM_CI=true
 
 # =============================================================================
 # RUNTIME ENVIRONMENT VARIABLES
 # =============================================================================
 # Required:
-#   REPOS_CSV_LOCATION  - Path or S3 URL to repos.csv
-#   RECIPE              - Recipe ID to run (e.g., org.openrewrite.java.search.FindTypes)
-#   OUTPUT_LOCATION     - S3 path for output (e.g., s3://bucket/output)
+#   REPOS_CSV_LOCATION   - Path or S3 URL to repos.csv
+#   RECIPE               - Recipe ID to run (e.g., org.openrewrite.java.search.FindTypes)
+#   OUTPUT_LOCATION      - S3 path for output (e.g., s3://bucket/output)
 #
-# Optional:
+# Required for PR creation:
+#   SCM_MAPPING_CSV      - Path to scm-mapping.csv (maps origins to SCM types)
+#
+# Optional - License:
+#   MODERNE_LICENSE_KEY  - License key (configured at runtime, not build time)
+#
+# Optional - Moderne tenant:
+#   MODERNE_TOKEN        - Moderne API token
+#   MODERNE_TENANT       - Moderne tenant URL (default: https://app.moderne.io)
+#   MODERNE_HOST         - Alias for MODERNE_TENANT (for backwards compatibility)
+#
+# Optional - Recipe execution:
 #   RECIPES_CSV_LOCATION - Path or S3 URL to recipes.csv (defines available recipes)
 #   ORGANIZATION         - Organization name for syncing repos
 #   RECIPE_OPTIONS       - Recipe options (e.g., "-Pfoo=bar -Pbaz=bop")
+#   RECIPE_TIMEOUT       - Timeout in seconds for recipe execution (0 = no timeout)
+#
+# Optional - PR creation:
 #   CREATE_PRS           - Set to "true" to create PRs (default: false)
 #   PR_TITLE             - Title for created PRs
 #   PR_BODY              - Body text for created PRs
 #   BRANCH_NAME          - Branch name for changes (default: moderne/<recipe-suffix>)
 #   COMMIT_MESSAGE       - Commit message for changes
 #
-# S3/LST Configuration:
-#   LST_BUCKET            - S3 bucket URL for pre-built LSTs (e.g., s3://my-lst-bucket)
-#   AWS_ACCESS_KEY_ID     - AWS access key (or Minio access key)
-#   AWS_SECRET_ACCESS_KEY - AWS secret key (or Minio secret key)
-#   S3_ENDPOINT           - S3-compatible endpoint URL (e.g., http://localhost:9000 for Minio)
-#   S3_REGION             - AWS region (optional, for cross-region access)
-#   S3_PROFILE            - AWS profile name (optional, for named profiles)
-#
-# Monitoring:
-#   - mod monitor metrics: http://localhost:8080/prometheus
-#   - Grafana dashboards:  http://localhost:3000
-#   - Prometheus:          http://localhost:9090
+# Optional - S3/LST Configuration:
+#   LST_BUCKET           - S3 bucket URL for pre-built LSTs (e.g., s3://my-lst-bucket)
+#   S3_ENDPOINT          - S3-compatible endpoint URL (e.g., for MinIO)
+#   S3_REGION            - AWS region
+#   S3_PROFILE           - AWS profile name
 
-CMD ["/app/entrypoint.sh"]
+CMD ["./run.sh"]

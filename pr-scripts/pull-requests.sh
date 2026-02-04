@@ -1,11 +1,12 @@
 #!/bin/bash
 # pull-requests.sh - Called via 'mod exec' for each repository
-# This script determines the SCM type and calls the appropriate PR creation script
+# This script looks up the SCM type from scm-mapping.csv and calls the appropriate PR script
 #
 # Environment variables expected:
 #   PR_TITLE - Title for the pull request
 #   PR_BODY - Body/description for the pull request
 #   BRANCH_NAME - The source branch with changes
+#   SCM_MAPPING_CSV - Path to scm-mapping.csv (maps origins to SCM types)
 #
 # Credentials are extracted from ~/.git-credentials (mounted at runtime)
 
@@ -18,13 +19,12 @@ echo "=========================================="
 echo "Date: $(date)"
 echo "PWD: $(pwd)"
 echo "User: $(whoami)"
-echo "Shell: $SHELL"
 echo ""
 echo "Environment variables:"
 echo "  BRANCH_NAME=$BRANCH_NAME"
 echo "  PR_TITLE=$PR_TITLE"
 echo "  PR_BODY=${PR_BODY:0:50}..."
-echo "  HOME=$HOME"
+echo "  SCM_MAPPING_CSV=$SCM_MAPPING_CSV"
 echo ""
 echo "Checking prerequisites..."
 echo "  git version: $(git --version 2>&1 || echo 'NOT FOUND')"
@@ -33,6 +33,23 @@ echo ""
 
 # Trap errors to help debug
 trap 'echo "ERROR: Script failed at line $LINENO with exit code $?"' ERR
+
+# =============================================================================
+# Validate SCM mapping file
+# =============================================================================
+if [ -z "$SCM_MAPPING_CSV" ]; then
+    echo "ERROR: SCM_MAPPING_CSV environment variable is not set"
+    echo "  Please provide the path to scm-mapping.csv"
+    exit 1
+fi
+
+if [ ! -f "$SCM_MAPPING_CSV" ]; then
+    echo "ERROR: SCM mapping file not found: $SCM_MAPPING_CSV"
+    echo "  Please create scm-mapping.csv with origin,scmType columns"
+    exit 1
+fi
+
+echo "SCM mapping file: $SCM_MAPPING_CSV"
 
 # Get the origin URL
 echo "Getting origin URL..."
@@ -84,7 +101,7 @@ echo "  Origin: $ORIGIN_URL"
 echo "  Source branch: $BRANCH_NAME"
 echo "  Target branch: $TARGET_BRANCH"
 
-# Extract hostname from origin URL for credential lookup
+# Extract hostname from origin URL for credential lookup and SCM mapping
 # Handle various URL formats:
 #   https://github.com/org/repo.git
 #   git@github.com:org/repo.git
@@ -106,6 +123,45 @@ extract_host() {
 HOST=$(extract_host "$ORIGIN_URL")
 echo "  Host: $HOST"
 
+if [ -z "$HOST" ]; then
+    echo "ERROR: Could not extract host from origin URL: $ORIGIN_URL"
+    exit 1
+fi
+
+# =============================================================================
+# Look up SCM type from mapping file
+# =============================================================================
+# scm-mapping.csv format:
+#   origin,scmType
+#   github.com,GitHub
+#   bitbucket.example.com,BitbucketDataCenter
+lookup_scm_type() {
+    local host="$1"
+    local mapping_file="$2"
+
+    # Skip comment lines (starting with #) and empty lines
+    # Case-insensitive match on the origin column
+    local scm_type=$(grep -v "^#" "$mapping_file" | grep -v "^$" | \
+        awk -F',' -v host="$host" 'tolower($1) == tolower(host) { print $2; exit }')
+
+    echo "$scm_type"
+}
+
+SCM_TYPE=$(lookup_scm_type "$HOST" "$SCM_MAPPING_CSV")
+
+if [ -z "$SCM_TYPE" ]; then
+    echo "ERROR: No SCM type mapping found for host: $HOST"
+    echo "  Please add an entry to $SCM_MAPPING_CSV:"
+    echo "    $HOST,<scmType>"
+    echo ""
+    echo "  Supported SCM types:"
+    echo "    - GitHub"
+    echo "    - BitbucketDataCenter"
+    exit 1
+fi
+
+echo "  SCM Type: $SCM_TYPE (from mapping)"
+
 # Look up credentials from .git-credentials
 # Format: https://username:password@hostname or https://token@hostname
 GIT_CREDENTIALS_FILE="${HOME}/.git-credentials"
@@ -118,8 +174,10 @@ urldecode() {
 }
 
 if [ -f "$GIT_CREDENTIALS_FILE" ] && [ -n "$HOST" ]; then
-    # Find the line matching this host
-    CRED_LINE=$(grep -i "$HOST" "$GIT_CREDENTIALS_FILE" | head -1)
+    # Find the line matching this host (anchored to avoid substring matches)
+    # Escape dots in hostname for regex, then match after @ followed by port, path, or end-of-line
+    HOST_ESCAPED=$(echo "$HOST" | sed 's/\./\\./g')
+    CRED_LINE=$(grep -iE "@${HOST_ESCAPED}([:/]|$)" "$GIT_CREDENTIALS_FILE" | head -1)
     if [ -n "$CRED_LINE" ]; then
         # Extract username and password/token
         # Format: https://user:pass@host or https://token@host
@@ -140,88 +198,42 @@ if [ -f "$GIT_CREDENTIALS_FILE" ] && [ -n "$HOST" ]; then
         echo "  Credentials: Not found for host $HOST"
     fi
 else
-    echo "  Credentials: .git-credentials not available"
+    echo "  ERROR: .git-credentials file not found at $GIT_CREDENTIALS_FILE"
+    echo "  PR creation requires HTTPS credentials even if you use SSH keys for git operations."
+    echo "  Mount a .git-credentials file with: -v ./.git-credentials:/root/.git-credentials:ro"
+    echo "  Format: https://username:token@$HOST"
+    exit 1
 fi
 
-# Export credentials for sub-scripts
+# Detect SSL configuration for curl calls in sub-scripts
+# If git is configured to skip SSL verification, pass that through to curl
+CURL_SSL_OPTS=""
+if [ "$(git config --get http.sslVerify 2>/dev/null)" = "false" ]; then
+    CURL_SSL_OPTS="--insecure"
+    echo "  SSL: Verification disabled (matching git http.sslVerify=false)"
+fi
+
+# Export credentials and SSL config for sub-scripts
 export CRED_USER
 export CRED_PASS
 export TARGET_BRANCH
+export CURL_SSL_OPTS
 
-# Determine SCM type and call appropriate script
-# Detection logic:
-#   1. URL contains "github" -> GitHub
-#   2. URL contains "bitbucket" or "/scm/" -> Bitbucket Data Center
-#   3. Probe the server API to detect type
+# Call appropriate PR script based on SCM type
 SCRIPT_DIR="$(dirname "$0")"
 
-# Function to detect SCM type by probing server APIs
-detect_scm_type() {
-    local host="$1"
-
-    # Build base URL for API probing
-    local base_url="https://$host"
-    # Handle hosts with ports (e.g., host.docker.internal:7990)
-    if echo "$host" | grep -q ":"; then
-        # Check if it's likely HTTP (common Bitbucket ports)
-        if echo "$host" | grep -qE ":(7990|8080|80)$"; then
-            base_url="http://$host"
-        fi
-    fi
-
-    # Try Bitbucket Data Center endpoint
-    # GET /rest/api/1.0/application-properties returns server info
-    local bb_response=$(curl -s -o /dev/null -w "%{http_code}" \
-        --connect-timeout 5 \
-        "$base_url/rest/api/1.0/application-properties" 2>/dev/null)
-
-    if [ "$bb_response" = "200" ] || [ "$bb_response" = "401" ]; then
-        # 200 = success, 401 = auth required but endpoint exists
-        echo "bitbucket"
-        return
-    fi
-
-    # Try GitHub API endpoint
-    local gh_response=$(curl -s -o /dev/null -w "%{http_code}" \
-        --connect-timeout 5 \
-        "$base_url/api/v3" 2>/dev/null)
-
-    if [ "$gh_response" = "200" ] || [ "$gh_response" = "401" ]; then
-        echo "github"
-        return
-    fi
-
-    # Unknown
-    echo "unknown"
-}
-
-# First try pattern matching (fast)
-SCM_TYPE=""
-if echo "$ORIGIN_URL" | grep -qiE "github\.com|github\."; then
-    SCM_TYPE="github"
-elif echo "$ORIGIN_URL" | grep -qiE "bitbucket|/scm/"; then
-    SCM_TYPE="bitbucket"
-fi
-
-# If pattern matching didn't work, probe the server
-if [ -z "$SCM_TYPE" ]; then
-    echo "  Detecting SCM type by probing server..."
-    SCM_TYPE=$(detect_scm_type "$HOST")
-fi
-
 case "$SCM_TYPE" in
-    github)
-        echo "  SCM: GitHub"
+    GitHub)
+        echo "  Calling: github-pr.sh"
         "$SCRIPT_DIR/github-pr.sh" "$ORIGIN_URL" "$TARGET_BRANCH"
         ;;
-    bitbucket)
-        echo "  SCM: Bitbucket Data Center"
+    BitbucketDataCenter)
+        echo "  Calling: bitbucket-data-center-pr.sh"
         "$SCRIPT_DIR/bitbucket-data-center-pr.sh" "$ORIGIN_URL" "$TARGET_BRANCH"
         ;;
     *)
-        echo "  WARNING: Unknown SCM type for URL: $ORIGIN_URL"
-        echo "  Host: $HOST"
-        echo "  Skipping PR creation"
-        exit 0
+        echo "ERROR: Unsupported SCM type: $SCM_TYPE"
+        echo "  Supported types: GitHub, BitbucketDataCenter"
+        exit 1
         ;;
 esac

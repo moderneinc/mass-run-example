@@ -2,8 +2,14 @@
 # Note: We intentionally do NOT use 'set -e' here because the Moderne CLI returns:
 #   - Exit code 0:  MOD SUCCEEDED
 #   - Exit code -1: MOD FAILED
-#   - Exit code -2: MOD PARTIALLY SUCCEEDED
+#   - Exit code -2: MOD PARTIALLY SUCCEEDED (wraps to 254)
 # We want the script to continue through partial successes and only report errors at the end.
+set -o nounset
+set -o pipefail
+
+# Disable ANSI escape codes in CLI output for clean log files
+export NO_COLOR=true
+export TERM=dumb
 
 # Track errors for final summary
 ERRORS=()
@@ -23,22 +29,23 @@ CLI_OUTPUT_FILE="./cli-output.txt"
 
 # Helper function to run a command and log its output
 # Always returns 0 to ensure script continues; errors are tracked in ERRORS array
+# Usage: run_and_log "description" command [args...]
 run_and_log() {
-    local cmd="$1"
-    local description="${2:-$cmd}"  # Optional description for error tracking
+    local description="$1"
+    shift
     echo "===============================================================================" >> "$CLI_OUTPUT_FILE"
-    echo "COMMAND: $cmd" >> "$CLI_OUTPUT_FILE"
+    echo "COMMAND: $*" >> "$CLI_OUTPUT_FILE"
     echo "TIME: $(date -Iseconds)" >> "$CLI_OUTPUT_FILE"
     echo "===============================================================================" >> "$CLI_OUTPUT_FILE"
-    # Run command and capture output, also display to stdout
-    eval "$cmd" 2>&1 | tee -a "$CLI_OUTPUT_FILE"
+    # Run command directly (no eval) and capture output, also display to stdout
+    "$@" 2>&1 | tee -a "$CLI_OUTPUT_FILE"
     local exit_code=${PIPESTATUS[0]}
     echo "" >> "$CLI_OUTPUT_FILE"
 
     # Log exit code interpretation
     if [ $exit_code -eq 0 ]; then
         echo "  -> Exit code: 0 (SUCCESS)" >> "$CLI_OUTPUT_FILE"
-    elif [ $exit_code -eq 254 ] || [ $exit_code -eq -2 ]; then
+    elif [ $exit_code -eq 254 ]; then
         echo "  -> Exit code: $exit_code (PARTIAL SUCCESS)" >> "$CLI_OUTPUT_FILE"
     else
         echo "  -> Exit code: $exit_code (FAILED)" >> "$CLI_OUTPUT_FILE"
@@ -53,6 +60,13 @@ run_and_log() {
 echo "=== Mass Run Starting ==="
 
 # =============================================================================
+# Start mod monitor for metrics (Prometheus/Grafana)
+# =============================================================================
+echo "=== Starting mod monitor ==="
+$mod_command monitor --port 8080 > /dev/null 2>&1 &
+MOD_MONITOR_PID=$!
+
+# =============================================================================
 # Reset trust store config if it points to a non-existent path
 # =============================================================================
 echo "=== Clearing trust store config ==="
@@ -61,6 +75,7 @@ $mod_command config http trust-store delete || true
 # =============================================================================
 # Configure license if provided at runtime
 # =============================================================================
+MODERNE_LICENSE_KEY="${MODERNE_LICENSE_KEY:-}"
 if [ -n "$MODERNE_LICENSE_KEY" ]; then
     echo "=== Configuring Moderne license ==="
     $mod_command config license edit "$MODERNE_LICENSE_KEY"
@@ -69,10 +84,12 @@ fi
 # =============================================================================
 # Configure Moderne tenant if token provided
 # =============================================================================
+MODERNE_TOKEN="${MODERNE_TOKEN:-}"
 if [ -n "$MODERNE_TOKEN" ]; then
     echo "=== Configuring Moderne tenant ==="
-    MODERNE_HOST="${MODERNE_HOST:-https://app.moderne.io}"
-    $mod_command config moderne edit "$MODERNE_HOST" --token "$MODERNE_TOKEN"
+    # Support both MODERNE_TENANT (mass-ingest convention) and MODERNE_HOST
+    MODERNE_TENANT="${MODERNE_TENANT:-${MODERNE_HOST:-https://app.moderne.io}}"
+    $mod_command config moderne edit --token="$MODERNE_TOKEN" "$MODERNE_TENANT"
 fi
 
 # =============================================================================
@@ -94,6 +111,9 @@ ORGANIZATION="${ORGANIZATION:-}"
 # Optional - Recipe options (e.g., "-Pfoo=bar -Pbaz=bop")
 RECIPE_OPTIONS="${RECIPE_OPTIONS:-}"
 
+# Optional - Timeout for recipe execution in seconds (0 = no timeout)
+RECIPE_TIMEOUT="${RECIPE_TIMEOUT:-0}"
+
 # Optional - S3 bucket for pre-built LSTs
 LST_BUCKET="${LST_BUCKET:-}"
 
@@ -114,6 +134,10 @@ build_aws_args() {
     if [ -n "$S3_PROFILE" ]; then
         args="$args --profile $S3_PROFILE"
     fi
+    # Honor git's SSL verification setting for S3-compatible endpoints
+    if [ "$(git config --get http.sslVerify 2>/dev/null)" = "false" ]; then
+        args="$args --no-verify-ssl"
+    fi
     echo "$args"
 }
 AWS_S3_ARGS=$(build_aws_args)
@@ -122,9 +146,23 @@ AWS_S3_ARGS=$(build_aws_args)
 CREATE_PRS="${CREATE_PRS:-false}"
 PR_TITLE="${PR_TITLE:-Automated changes from $RECIPE}"
 PR_BODY="${PR_BODY:-}"
-BRANCH_NAME="${BRANCH_NAME:-moderne/$(echo $RECIPE | sed 's/.*\.//')}"
+BRANCH_NAME="${BRANCH_NAME:-moderne/$(echo "$RECIPE" | sed 's/.*\.//')}"
 COMMIT_MESSAGE="${COMMIT_MESSAGE:-Apply $RECIPE}"
 # Note: TARGET_BRANCH is read from repos.csv for each repo (the branch column)
+
+# SCM mapping file (required for PR creation)
+SCM_MAPPING_CSV="${SCM_MAPPING_CSV:-/app/scm-mapping.csv}"
+
+# Validate SCM mapping file if PR creation is enabled
+if [ "$CREATE_PRS" = "true" ]; then
+    if [ ! -f "$SCM_MAPPING_CSV" ]; then
+        echo "ERROR: SCM mapping file not found: $SCM_MAPPING_CSV"
+        echo "  When CREATE_PRS=true, you must provide scm-mapping.csv"
+        echo "  Mount it to the container: -v ./scm-mapping.csv:/app/scm-mapping.csv"
+        exit 1
+    fi
+    echo "SCM mapping: $SCM_MAPPING_CSV"
+fi
 
 # Create timestamp for output directory
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
@@ -138,11 +176,17 @@ echo "Create PRs: $CREATE_PRS"
 # Step 0: Download CSV files from S3 if needed and configure recipes
 # =============================================================================
 
-# Download repos.csv from S3 if needed
+# Download repos.csv from S3 or HTTP/HTTPS if needed
 if [[ "$REPOS_CSV_LOCATION" == s3://* ]]; then
     echo "=== Downloading repos.csv from S3 ==="
     LOCAL_REPOS_CSV_LOCATION="./repos.csv"
     aws s3 cp $AWS_S3_ARGS "$REPOS_CSV_LOCATION" "$LOCAL_REPOS_CSV_LOCATION"
+    REPOS_CSV_LOCATION="$LOCAL_REPOS_CSV_LOCATION"
+    echo "  -> Downloaded to $LOCAL_REPOS_CSV_LOCATION"
+elif [[ "$REPOS_CSV_LOCATION" == http://* ]] || [[ "$REPOS_CSV_LOCATION" == https://* ]]; then
+    echo "=== Downloading repos.csv from HTTP ==="
+    LOCAL_REPOS_CSV_LOCATION="./repos.csv"
+    curl -f -s -o "$LOCAL_REPOS_CSV_LOCATION" "$REPOS_CSV_LOCATION"
     REPOS_CSV_LOCATION="$LOCAL_REPOS_CSV_LOCATION"
     echo "  -> Downloaded to $LOCAL_REPOS_CSV_LOCATION"
 fi
@@ -157,6 +201,10 @@ if [ -n "$RECIPES_CSV_LOCATION" ]; then
     if [[ "$RECIPES_CSV_LOCATION" == s3://* ]]; then
         echo "  -> Downloading recipes-v5.csv from S3..."
         aws s3 cp $AWS_S3_ARGS "$RECIPES_CSV_LOCATION" "$MODERNE_CLI_DIR/recipes-v5.csv"
+        echo "  -> Downloaded to $MODERNE_CLI_DIR/recipes-v5.csv"
+    elif [[ "$RECIPES_CSV_LOCATION" == http://* ]] || [[ "$RECIPES_CSV_LOCATION" == https://* ]]; then
+        echo "  -> Downloading recipes-v5.csv from HTTP..."
+        curl -f -s -o "$MODERNE_CLI_DIR/recipes-v5.csv" "$RECIPES_CSV_LOCATION"
         echo "  -> Downloaded to $MODERNE_CLI_DIR/recipes-v5.csv"
     else
         echo "  -> Copying recipes-v5.csv to $MODERNE_CLI_DIR/..."
@@ -193,14 +241,14 @@ fi
 # =============================================================================
 # Sets up repo metadata and optionally source code from the CSV
 echo "=== Step 1: Syncing repositories ==="
-SYNC_OPTS=""
+SYNC_CMD=($mod_command git sync csv ./repos "$REPOS_CSV_LOCATION")
 if [ -n "$ORGANIZATION" ]; then
-    SYNC_OPTS="$SYNC_OPTS --organization $ORGANIZATION"
+    SYNC_CMD+=(--organization "$ORGANIZATION")
 fi
 
 # Sync repos - LSTs will be pulled from S3 via publishUri in repos-lock.csv
 # Mass-run only uses pre-built LSTs; building is done by mass-ingest
-run_and_log "$mod_command git sync csv ./repos \"$REPOS_CSV_LOCATION\" $SYNC_OPTS" "git sync csv"
+run_and_log "git sync csv" "${SYNC_CMD[@]}"
 echo "  -> Repos synced. LSTs will be pulled from S3 via publishUri."
 
 # =============================================================================
@@ -209,11 +257,20 @@ echo "  -> Repos synced. LSTs will be pulled from S3 via publishUri."
 # Executes the recipe against pre-built LSTs
 echo "=== Step 2: Running recipe ==="
 # Allow partial success (some repos may not have matching code)
-run_and_log "$mod_command run ./repos --recipe \"$RECIPE\" $RECIPE_OPTIONS" "recipe run: $RECIPE"
+RUN_CMD=($mod_command run ./repos --recipe "$RECIPE")
+if [ -n "$RECIPE_OPTIONS" ]; then
+    # shellcheck disable=SC2206
+    RUN_CMD+=($RECIPE_OPTIONS)
+fi
+if [ "$RECIPE_TIMEOUT" -gt 0 ] 2>/dev/null; then
+    run_and_log "recipe run: $RECIPE (timeout: ${RECIPE_TIMEOUT}s)" timeout "$RECIPE_TIMEOUT" "${RUN_CMD[@]}"
+else
+    run_and_log "recipe run: $RECIPE" "${RUN_CMD[@]}"
+fi
 
 # Collect run logs immediately after recipe run
 echo "  -> Collecting run logs..."
-run_and_log "$mod_command log runs add ./repos runs.zip --last-recipe-run" "log runs add"
+run_and_log "log runs add" $mod_command log runs add ./repos runs.zip --last-recipe-run
 
 # =============================================================================
 # Step 3: Generate data tables
@@ -222,28 +279,21 @@ run_and_log "$mod_command log runs add ./repos runs.zip --last-recipe-run" "log 
 echo "=== Step 3: Generating data tables ==="
 mkdir -p ./data-tables
 
-# Get list of available data tables from the recipe run
-# Note: Data tables are stored in ./repos/*/.moderne/run/*/
-for repo_moderne in ./repos/*/.moderne/run/*/; do
-    if [ -d "$repo_moderne" ]; then
-        # Find all .tsv data table files and copy them
-        find "$repo_moderne" -name "*.tsv" -exec cp {} ./data-tables/ \; 2>/dev/null || true
-    fi
-done
+# Collect raw data table files from recipe runs (handles any directory nesting depth)
+find ./repos -path "*/.moderne/run/*/*.tsv" -exec cp {} ./data-tables/ \; 2>/dev/null || true
 
 # Run mod study for common data table types and extract the actual data table file path
 run_mod_study() {
     local data_table_name="$1"
-    local cmd="$mod_command study ./repos --last-recipe-run --data-table \"$data_table_name\""
 
     # Log the command
     echo "===============================================================================" >> "$CLI_OUTPUT_FILE"
-    echo "COMMAND: $cmd" >> "$CLI_OUTPUT_FILE"
+    echo "COMMAND: $mod_command study ./repos --last-recipe-run --data-table $data_table_name" >> "$CLI_OUTPUT_FILE"
     echo "TIME: $(date -Iseconds)" >> "$CLI_OUTPUT_FILE"
     echo "===============================================================================" >> "$CLI_OUTPUT_FILE"
 
     local output
-    output=$(eval "$cmd" 2>&1) || true
+    output=$($mod_command study ./repos --last-recipe-run --data-table "$data_table_name" 2>&1) || true
     echo "$output" >> "$CLI_OUTPUT_FILE"
     echo "" >> "$CLI_OUTPUT_FILE"
 
@@ -273,15 +323,15 @@ zip -r data-tables.zip ./data-tables/ 2>/dev/null || echo "No data tables found"
 # Rename each patch to include repo name to avoid overwriting
 echo "=== Step 4: Collecting patches ==="
 mkdir -p ./patches
-for patch_file in $(find ./repos -path "*/.moderne/run/*/fix.patch" 2>/dev/null); do
-    # Extract repo path from the patch file path
+while IFS= read -r -d '' patch_file; do
+    # Extract repo path from the patch file path using .moderne as anchor
     # e.g., ./repos/ALL/kmccarp/hotsliggityprotocol/.moderne/run/xxx/fix.patch -> kmccarp-hotsliggityprotocol
-    repo_path=$(echo "$patch_file" | sed -E 's|^\./repos/([^/]+/)?([^/]+/[^/]+)/\.moderne/.*|\2|' | tr '/' '-')
+    repo_path=$(echo "$patch_file" | sed 's|/\.moderne/.*||' | sed 's|^\./repos/||' | tr '/' '-')
     if [ -n "$repo_path" ] && [ -f "$patch_file" ]; then
         cp "$patch_file" "./patches/${repo_path}.patch"
         echo "  -> Collected patch: ${repo_path}.patch"
     fi
-done
+done < <(find ./repos -path "*/.moderne/run/*/fix.patch" -print0 2>/dev/null)
 zip -r patches.zip ./patches/ 2>/dev/null || echo "No patches found"
 
 # =============================================================================
@@ -310,14 +360,30 @@ if [ "$CREATE_PRS" = "true" ]; then
     head -1 "$REPOS_CSV_LOCATION" > "$FILTERED_REPOS_CSV_LOCATION"
 
     # Find repos that have patch files and add them to filtered CSV
-    for repo_dir in ./repos/*/; do
-        if ls "$repo_dir"/.moderne/run/*/fix.patch 2>/dev/null | head -1 > /dev/null; then
+    # Use find for recursive search to handle organization-based directory structures
+    # (e.g., ./repos/ALL/org/repo/.moderne/run/*/fix.patch)
+    while IFS= read -r -d '' patch_file; do
+        # Extract the repo directory from the patch path
+        repo_dir=$(echo "$patch_file" | sed -E 's|/\.moderne/run/.*||')
+        # Use git origin URL for reliable matching against cloneUrl column in CSV
+        REPO_CLONE_URL=$(git -C "$repo_dir" config --get remote.origin.url 2>/dev/null || true)
+        if [ -n "$REPO_CLONE_URL" ]; then
+            # Match by clone URL in the first CSV column (exact match avoids substring false positives)
+            awk -F',' -v url="$REPO_CLONE_URL" '$1 == url' "$REPOS_CSV_LOCATION" >> "$FILTERED_REPOS_CSV_LOCATION" 2>/dev/null || true
+        else
+            # Fallback: match by repo name in the first CSV column (skip header line)
             REPO_NAME=$(basename "$repo_dir")
-            # Find the matching line in the original CSV (match on repo name/path)
-            grep -E "(^|,)$REPO_NAME(,|$)" "$REPOS_CSV_LOCATION" >> "$FILTERED_REPOS_CSV_LOCATION" 2>/dev/null || \
-            grep "$REPO_NAME" "$REPOS_CSV_LOCATION" >> "$FILTERED_REPOS_CSV_LOCATION" 2>/dev/null || true
+            tail -n +2 "$REPOS_CSV_LOCATION" | awk -F',' -v name="$REPO_NAME" '$1 ~ name' >> "$FILTERED_REPOS_CSV_LOCATION" 2>/dev/null || true
         fi
-    done
+    done < <(find ./repos -path "*/.moderne/run/*/fix.patch" -print0 2>/dev/null)
+
+    # Deduplicate entries (preserving header)
+    if [ -f "$FILTERED_REPOS_CSV_LOCATION" ]; then
+        HEADER=$(head -1 "$FILTERED_REPOS_CSV_LOCATION")
+        tail -n +2 "$FILTERED_REPOS_CSV_LOCATION" | sort -u > "${FILTERED_REPOS_CSV_LOCATION}.tmp"
+        { echo "$HEADER"; cat "${FILTERED_REPOS_CSV_LOCATION}.tmp"; } > "$FILTERED_REPOS_CSV_LOCATION"
+        rm -f "${FILTERED_REPOS_CSV_LOCATION}.tmp"
+    fi
 
     REPOS_WITH_CHANGES=$(tail -n +2 "$FILTERED_REPOS_CSV_LOCATION" | wc -l | tr -d ' ')
     echo "  -> Found $REPOS_WITH_CHANGES repos with changes"
@@ -327,22 +393,26 @@ if [ "$CREATE_PRS" = "true" ]; then
     else
         # Sync only repos with changes, now with full sources
         # Note: This may partially succeed if some repos can't be synced
-        run_and_log "$mod_command git sync csv ./repos \"$FILTERED_REPOS_CSV_LOCATION\" --refresh-organization --with-sources" "git sync csv (with sources)"
+        SYNC_SOURCES_CMD=($mod_command git sync csv ./repos "$FILTERED_REPOS_CSV_LOCATION" --refresh-organization --with-sources)
+        if [ -n "$ORGANIZATION" ]; then
+            SYNC_SOURCES_CMD+=(--organization "$ORGANIZATION")
+        fi
+        run_and_log "git sync csv (with sources)" "${SYNC_SOURCES_CMD[@]}"
 
         # Create branch for changes (--last-recipe-run works for mod git commands after sync)
-        run_and_log "$mod_command git checkout ./repos -b \"$BRANCH_NAME\" --last-recipe-run" "git checkout"
+        run_and_log "git checkout" $mod_command git checkout ./repos -b "$BRANCH_NAME" --last-recipe-run
 
         # Apply the recipe changes to working tree
-        run_and_log "$mod_command git apply ./repos --last-recipe-run" "git apply"
+        run_and_log "git apply" $mod_command git apply ./repos --last-recipe-run
 
         # Stage changes
-        run_and_log "$mod_command git add ./repos --last-recipe-run" "git add"
+        run_and_log "git add" $mod_command git add ./repos --last-recipe-run
 
         # Commit changes
-        run_and_log "$mod_command git commit ./repos -m \"$COMMIT_MESSAGE\" --last-recipe-run" "git commit"
+        run_and_log "git commit" $mod_command git commit ./repos -m "$COMMIT_MESSAGE" --last-recipe-run
 
         # Push to remote
-        run_and_log "$mod_command git push ./repos --last-recipe-run origin \"$BRANCH_NAME\"" "git push"
+        run_and_log "git push" $mod_command git push ./repos --last-recipe-run origin "$BRANCH_NAME"
 
         # Create PRs using mod exec to properly handle nested org structure
         echo "=== Creating PRs for each repository ==="
@@ -351,23 +421,24 @@ if [ "$CREATE_PRS" = "true" ]; then
         export PR_TITLE="${PR_TITLE:-Automated changes from $RECIPE}"
         export PR_BODY="${PR_BODY:-}"
         export BRANCH_NAME
+        export SCM_MAPPING_CSV
 
         # Use mod exec to run pull-requests.sh in each repo that had changes
         # This properly handles the nested org structure (./repos/ALL/kmccarp/repo-name)
-        run_and_log "$mod_command exec ./repos --last-recipe-run -- /app/pr-scripts/pull-requests.sh" "create PRs"
+        run_and_log "create PRs" $mod_command exec ./repos --last-recipe-run -- /app/pr-scripts/pull-requests.sh
 
         # Collect PR creation logs (exec.log files)
         echo "  -> Collecting PR creation logs..."
         mkdir -p ./pr-logs
-        for exec_log in $(find ./repos -path "*/.moderne/exec/*/exec.log" 2>/dev/null); do
-            # Extract repo path from the exec.log path
+        while IFS= read -r -d '' exec_log; do
+            # Extract repo path from the exec.log path using .moderne as anchor
             # e.g., ./repos/ALL/kmccarp/deep-learning-model/.moderne/exec/xxx/exec.log -> kmccarp-deep-learning-model
-            repo_path=$(echo "$exec_log" | sed -E 's|^\./repos/(ALL/)?([^/]+/)?([^/]+/[^/]+)/\.moderne/.*|\3|' | tr '/' '-')
+            repo_path=$(echo "$exec_log" | sed 's|/\.moderne/.*||' | sed 's|^\./repos/||' | tr '/' '-')
             if [ -n "$repo_path" ] && [ -f "$exec_log" ]; then
                 cp "$exec_log" "./pr-logs/${repo_path}-pr.log"
                 echo "  -> Collected: ${repo_path}-pr.log"
             fi
-        done
+        done < <(find ./repos -path "*/.moderne/exec/*/exec.log" -print0 2>/dev/null)
         zip -r pr-logs.zip ./pr-logs/ 2>/dev/null || echo "No PR logs found"
     fi
 fi
@@ -393,7 +464,7 @@ echo "=== Summary ==="
     echo "Repos CSV: $REPOS_CSV_LOCATION"
     echo "Create PRs: $CREATE_PRS"
     echo "Branch: $BRANCH_NAME"
-    echo "Repos processed: $(find ./repos -maxdepth 1 -type d | wc -l)"
+    echo "Repos processed: $(find ./repos -name '.moderne' -type d 2>/dev/null | wc -l | tr -d ' ')"
     echo ""
     if [ ${#ERRORS[@]} -gt 0 ]; then
         echo "Errors encountered: ${#ERRORS[@]}"
@@ -417,9 +488,16 @@ echo "  - cli-output.txt"
 echo "  - pr-logs.zip (if PRs were created)"
 echo "  - summary.txt"
 
-# Exit with error if there were critical failures (exit code 255/-1)
-# Note: Partial successes (exit code 254/-2) are not considered failures
+# Stop mod monitor
+if [ -n "${MOD_MONITOR_PID:-}" ] && kill -0 "$MOD_MONITOR_PID" 2>/dev/null; then
+    echo "=== Stopping mod monitor ==="
+    kill "$MOD_MONITOR_PID" 2>/dev/null || true
+fi
+
+# Exit with non-zero status if there were critical failures
+# Orchestrators (CI/CD, AWS Batch, docker compose) use exit codes to determine success
 if [ ${#ERRORS[@]} -gt 0 ]; then
     echo ""
     echo "WARNING: ${#ERRORS[@]} error(s) occurred during execution (see summary.txt)"
+    exit 1
 fi

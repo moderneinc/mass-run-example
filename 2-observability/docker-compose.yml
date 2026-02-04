@@ -1,0 +1,55 @@
+services:
+  mass-run:
+    build:
+      context: ..
+      args:
+        MODERNE_CLI_VERSION: ${MODERNE_CLI_VERSION:-}
+        MODERNE_CLI_STAGE: ${MODERNE_CLI_STAGE:-stable}
+    env_file:
+      - .env
+    restart: "no"
+    ports:
+      - "8080:8080"
+    volumes:
+      # Mount repos.csv (required)
+      - ./repos.csv:/app/repos.csv:ro
+      # Mount SCM mapping file (required for PR creation)
+      - ./scm-mapping.csv:/app/scm-mapping.csv:ro
+      # Mount git credentials for private repositories
+      # - ./.git-credentials:/root/.git-credentials:ro
+      # Or mount SSH keys instead:
+      # - ./.ssh:/root/.ssh:ro
+    networks:
+      - monitoring
+
+  prometheus:
+    image: prom/prometheus:latest
+    restart: unless-stopped
+    # Uncomment to access Prometheus UI directly (optional - Grafana is the primary interface)
+    # ports:
+    #   - "9090:9090"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    networks:
+      - monitoring
+
+  grafana:
+    image: grafana/grafana:latest
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./observability/grafana/dashboards:/etc/grafana/dashboards:ro
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    networks:
+      - monitoring
+    depends_on:
+      - prometheus
+
+networks:
+  monitoring:
+    driver: bridge

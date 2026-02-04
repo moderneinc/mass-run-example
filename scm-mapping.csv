@@ -1,0 +1,22 @@
+# SCM Type Mapping
+# This file maps repository origins (hostnames) to their SCM types.
+# Required when CREATE_PRS=true to determine which API to use for PR creation.
+#
+# Supported SCM types:
+#   - GitHub           (for github.com and GitHub Enterprise)
+#   - BitbucketDataCenter (for Bitbucket Server/Data Center)
+#
+# Coming soon:
+#   - GitLab
+#   - AzureDevOps
+#   - BitbucketCloud
+#
+# Format: origin,scmType
+# - origin: The hostname of your SCM (must match the host in your repo URLs)
+# - scmType: One of the supported types above (case-sensitive)
+#
+# Examples:
+#   github.com,GitHub
+#   bitbucket.mycompany.com,BitbucketDataCenter
+#   github.mycompany.com,GitHub
+origin,scmType
