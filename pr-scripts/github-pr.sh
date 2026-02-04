@@ -11,6 +11,8 @@
 #   BRANCH_NAME - The source branch with changes
 #   CRED_USER - Username from .git-credentials (optional)
 #   CRED_PASS - Token from .git-credentials
+#   REPO_ORIGIN - Origin hostname from repos.csv (e.g., "github.com")
+#   REPO_PATH - Repository path from repos.csv (e.g., "owner/repo")
 
 ORIGIN_URL="$1"
 TARGET_BRANCH="$2"
@@ -21,40 +23,22 @@ if [ -z "$CRED_PASS" ]; then
     exit 1
 fi
 
-# Parse GitHub URL to extract host, owner, and repo
-# Formats supported:
-#   https://github.com/owner/repo.git
-#   https://github.com/owner/repo
-#   ssh://git@github.com/owner/repo.git
-#   git@github.com:owner/repo.git
-#   https://github.example.com/owner/repo.git (GitHub Enterprise)
-
 GH_HOST=""
 GH_OWNER=""
 GH_REPO=""
 
-if echo "$ORIGIN_URL" | grep -qE "^ssh://"; then
-    # SSH URL format: ssh://git@host/owner/repo.git or ssh://git@host:port/owner/repo.git
-    GH_HOST=$(echo "$ORIGIN_URL" | sed -E 's|^ssh://[^@]+@([^/:]+).*|\1|')
-    GH_OWNER=$(echo "$ORIGIN_URL" | sed -E 's|^ssh://[^@]+@[^/]+/([^/]+)/.*|\1|')
-    GH_REPO=$(echo "$ORIGIN_URL" | sed -E 's|^ssh://[^@]+@[^/]+/[^/]+/([^/]+)(\.git)?$|\1|')
-elif echo "$ORIGIN_URL" | grep -q "^https\?://"; then
-    # HTTPS format: https://host/owner/repo.git
-    GH_HOST=$(echo "$ORIGIN_URL" | sed -E 's|^https?://([^/]+)/.*|\1|')
-    GH_OWNER=$(echo "$ORIGIN_URL" | sed -E 's|^https?://[^/]+/([^/]+)/.*|\1|')
-    GH_REPO=$(echo "$ORIGIN_URL" | sed -E 's|^https?://[^/]+/[^/]+/([^/]+)(\.git)?$|\1|')
-elif echo "$ORIGIN_URL" | grep -q "@.*:"; then
-    # SCP format: git@host:owner/repo.git
-    GH_HOST=$(echo "$ORIGIN_URL" | sed -E 's|^[^@]+@([^:]+):.*|\1|')
-    GH_OWNER=$(echo "$ORIGIN_URL" | sed -E 's|^[^@]+@[^:]+:([^/]+)/.*|\1|')
-    GH_REPO=$(echo "$ORIGIN_URL" | sed -E 's|^[^@]+@[^:]+:[^/]+/([^/]+)(\.git)?$|\1|')
+# Prefer repos.csv path column (set by pull-requests.sh from repos.csv)
+# This avoids fragile URL parsing across SSH, HTTPS, and SCP variants
+if [ -n "${REPO_PATH:-}" ] && [ -n "${REPO_ORIGIN:-}" ]; then
+    GH_HOST="$REPO_ORIGIN"
+    GH_OWNER=$(echo "$REPO_PATH" | cut -d'/' -f1)
+    GH_REPO=$(echo "$REPO_PATH" | cut -d'/' -f2)
 fi
 
-# Remove .git suffix if present
-GH_REPO="${GH_REPO%.git}"
-
 if [ -z "$GH_HOST" ] || [ -z "$GH_OWNER" ] || [ -z "$GH_REPO" ]; then
-    echo "  ERROR: Could not parse GitHub URL: $ORIGIN_URL"
+    echo "  ERROR: Could not determine GitHub owner/repo"
+    echo "  Ensure repos.csv has 'path' column with owner/repo (e.g., org/my-repo)"
+    echo "  Origin URL: $ORIGIN_URL"
     exit 1
 fi
 

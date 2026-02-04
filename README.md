@@ -63,12 +63,13 @@ docker compose up -d
 Defines the repositories to run recipes against. See the [repos.csv documentation](https://docs.moderne.io/user-documentation/moderne-cli/references/repos-csv/).
 
 ```csv
-cloneUrl,branch,publishUri
-https://github.com/org/repo1.git,main,s3://lst-bucket/org/repo1
-https://github.com/org/repo2.git,main,s3://lst-bucket/org/repo2
+cloneUrl,branch,origin,path,publishUri
+https://github.com/org/repo1.git,main,github.com,org/repo1,s3://lst-bucket/org/repo1
+https://github.com/org/repo2.git,main,github.com,org/repo2,s3://lst-bucket/org/repo2
 ```
 
-The `publishUri` column points to where the pre-built LST is stored (from mass-ingest).
+- `publishUri` - where the pre-built LST is stored (from mass-ingest)
+- `origin` and `path` - **required for PR creation**; used to identify the project/repo on the SCM host
 
 ### scm-mapping.csv
 

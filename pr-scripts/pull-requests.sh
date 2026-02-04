@@ -120,12 +120,29 @@ extract_host() {
     fi
 }
 
-HOST=$(extract_host "$ORIGIN_URL")
-echo "  Host: $HOST"
+REPO_ORIGIN=$(extract_host "$ORIGIN_URL")
+echo "  Origin: $REPO_ORIGIN"
 
-if [ -z "$HOST" ]; then
-    echo "ERROR: Could not extract host from origin URL: $ORIGIN_URL"
+if [ -z "$REPO_ORIGIN" ]; then
+    echo "ERROR: Could not extract origin from URL: $ORIGIN_URL"
     exit 1
+fi
+
+# =============================================================================
+# Look up repo path from repos.csv (avoids fragile URL parsing)
+# =============================================================================
+# repos.csv may have origin and path columns (e.g., origin=github.com, path=org/repo)
+# The path column maps directly to owner/repo (GitHub) or project/repo (Bitbucket)
+REPO_PATH=""
+if [ -n "${REPOS_CSV_LOCATION:-}" ] && [ -f "${REPOS_CSV_LOCATION}" ]; then
+    # Find the "path" column index from header
+    PATH_COL=$(head -1 "$REPOS_CSV_LOCATION" | tr ',' '\n' | grep -n '^path$' | cut -d: -f1)
+    if [ -n "$PATH_COL" ]; then
+        REPO_PATH=$(awk -F',' -v url="$ORIGIN_URL" -v col="$PATH_COL" '$1 == url {print $col; exit}' "$REPOS_CSV_LOCATION")
+        if [ -n "$REPO_PATH" ]; then
+            echo "  Path: $REPO_PATH (from repos.csv)"
+        fi
+    fi
 fi
 
 # =============================================================================
@@ -147,12 +164,12 @@ lookup_scm_type() {
     echo "$scm_type"
 }
 
-SCM_TYPE=$(lookup_scm_type "$HOST" "$SCM_MAPPING_CSV")
+SCM_TYPE=$(lookup_scm_type "$REPO_ORIGIN" "$SCM_MAPPING_CSV")
 
 if [ -z "$SCM_TYPE" ]; then
-    echo "ERROR: No SCM type mapping found for host: $HOST"
+    echo "ERROR: No SCM type mapping found for origin: $REPO_ORIGIN"
     echo "  Please add an entry to $SCM_MAPPING_CSV:"
-    echo "    $HOST,<scmType>"
+    echo "    $REPO_ORIGIN,<scmType>"
     echo ""
     echo "  Supported SCM types:"
     echo "    - GitHub"
@@ -173,11 +190,11 @@ urldecode() {
     printf '%b' "${1//%/\\x}"
 }
 
-if [ -f "$GIT_CREDENTIALS_FILE" ] && [ -n "$HOST" ]; then
-    # Find the line matching this host (anchored to avoid substring matches)
+if [ -f "$GIT_CREDENTIALS_FILE" ] && [ -n "$REPO_ORIGIN" ]; then
+    # Find the line matching this origin (anchored to avoid substring matches)
     # Escape dots in hostname for regex, then match after @ followed by port, path, or end-of-line
-    HOST_ESCAPED=$(echo "$HOST" | sed 's/\./\\./g')
-    CRED_LINE=$(grep -iE "@${HOST_ESCAPED}([:/]|$)" "$GIT_CREDENTIALS_FILE" | head -1)
+    ORIGIN_ESCAPED=$(echo "$REPO_ORIGIN" | sed 's/\./\\./g')
+    CRED_LINE=$(grep -iE "@${ORIGIN_ESCAPED}([:/]|$)" "$GIT_CREDENTIALS_FILE" | head -1)
     if [ -n "$CRED_LINE" ]; then
         # Extract username and password/token
         # Format: https://user:pass@host or https://token@host
@@ -195,13 +212,13 @@ if [ -f "$GIT_CREDENTIALS_FILE" ] && [ -n "$HOST" ]; then
         fi
         echo "  Credentials: Found in .git-credentials"
     else
-        echo "  Credentials: Not found for host $HOST"
+        echo "  Credentials: Not found for origin $REPO_ORIGIN"
     fi
 else
     echo "  ERROR: .git-credentials file not found at $GIT_CREDENTIALS_FILE"
     echo "  PR creation requires HTTPS credentials even if you use SSH keys for git operations."
     echo "  Mount a .git-credentials file with: -v ./.git-credentials:/root/.git-credentials:ro"
-    echo "  Format: https://username:token@$HOST"
+    echo "  Format: https://username:token@$REPO_ORIGIN"
     exit 1
 fi
 
@@ -213,11 +230,13 @@ if [ "$(git config --get http.sslVerify 2>/dev/null)" = "false" ]; then
     echo "  SSL: Verification disabled (matching git http.sslVerify=false)"
 fi
 
-# Export credentials and SSL config for sub-scripts
+# Export credentials, path, and SSL config for sub-scripts
 export CRED_USER
 export CRED_PASS
 export TARGET_BRANCH
 export CURL_SSL_OPTS
+export REPO_ORIGIN
+export REPO_PATH
 
 # Call appropriate PR script based on SCM type
 SCRIPT_DIR="$(dirname "$0")"

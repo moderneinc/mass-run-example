@@ -30,10 +30,12 @@ docker build --build-arg MODERNE_CLI_STAGE=staging -t mass-run:quickstart ..
 
 **repos.csv** - List of repositories with their LST locations:
 ```csv
-cloneUrl,branch,publishUri
-https://github.com/org/repo1.git,main,s3://lst-bucket/org/repo1
-https://github.com/org/repo2.git,main,s3://lst-bucket/org/repo2
+cloneUrl,branch,origin,path,publishUri
+https://github.com/org/repo1.git,main,github.com,org/repo1,s3://lst-bucket/org/repo1
+https://github.com/org/repo2.git,main,github.com,org/repo2,s3://lst-bucket/org/repo2
 ```
+
+The `origin` and `path` columns are required for PR creation (used to identify the project/repo on the SCM host).
 
 **scm-mapping.csv** - Required for PR creation, maps hosts to SCM types:
 ```csv

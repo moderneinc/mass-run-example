@@ -11,62 +11,28 @@
 #   BRANCH_NAME - The source branch with changes
 #   CRED_USER - Username from .git-credentials
 #   CRED_PASS - Password/token from .git-credentials
+#   REPO_ORIGIN - Origin hostname from repos.csv (e.g., "bitbucket.example.com")
+#   REPO_PATH - Repository path from repos.csv (e.g., "PROJECT/repo")
 
 ORIGIN_URL="$1"
 TARGET_BRANCH="$2"
-
-# Parse Bitbucket URL to extract host, project, and repo
-# Formats supported:
-#   https://bitbucket.example.com/scm/PROJECT/repo.git
-#   ssh://git@bitbucket.example.com/PROJECT/repo.git
-#   ssh://git@bitbucket.example.com:7999/PROJECT/repo.git
-#   https://bitbucket.example.com/projects/PROJECT/repos/repo
-#   git@bitbucket.example.com:PROJECT/repo.git
 
 BB_HOST=""
 BB_PROJECT=""
 BB_REPO=""
 
-# Try each URL format in order of specificity
-if echo "$ORIGIN_URL" | grep -qE "^https?://[^/]+/scm/[^/]+/"; then
-    # Format: https://host/scm/PROJECT/repo.git
-    BB_HOST=$(echo "$ORIGIN_URL" | sed -E 's|^(https?://[^/]+)/.*|\1|')
-    BB_PROJECT=$(echo "$ORIGIN_URL" | sed -E 's|^https?://[^/]+/scm/([^/]+)/.*|\1|')
-    BB_REPO=$(echo "$ORIGIN_URL" | sed -E 's|^https?://[^/]+/scm/[^/]+/([^/]+)(\.git)?$|\1|')
-elif echo "$ORIGIN_URL" | grep -qE "^https?://[^/]+/projects/[^/]+/repos/"; then
-    # Format: https://host/projects/PROJECT/repos/repo
-    BB_HOST=$(echo "$ORIGIN_URL" | sed -E 's|^(https?://[^/]+)/.*|\1|')
-    BB_PROJECT=$(echo "$ORIGIN_URL" | sed -E 's|^https?://[^/]+/projects/([^/]+)/.*|\1|')
-    BB_REPO=$(echo "$ORIGIN_URL" | sed -E 's|^https?://[^/]+/projects/[^/]+/repos/([^/]+).*|\1|')
-elif echo "$ORIGIN_URL" | grep -qE "^ssh://[^@]+@[^/]+/[^/]+/"; then
-    # SSH format: ssh://git@host/PROJECT/repo.git or ssh://git@host:port/PROJECT/repo.git
-    # Also handles: ssh://git@host:port/scm/PROJECT/repo.git
-    # Extract host (may include port), then remove port for API URL
-    host_with_port=$(echo "$ORIGIN_URL" | sed -E 's|^ssh://[^@]+@([^/]+)/.*|\1|')
-    host_only=$(echo "$host_with_port" | sed -E 's|:.*||')
-    BB_HOST="https://$host_only"
-    # Strip /scm/ prefix from path if present (some BB installations include it in SSH URLs)
-    ssh_path=$(echo "$ORIGIN_URL" | sed -E 's|^ssh://[^@]+@[^/]+/||')
-    ssh_path=$(echo "$ssh_path" | sed -E 's|^scm/||')
-    BB_PROJECT=$(echo "$ssh_path" | sed -E 's|([^/]+)/.*|\1|')
-    BB_REPO=$(echo "$ssh_path" | sed -E 's|[^/]+/([^/]+)(\.git)?$|\1|')
-elif echo "$ORIGIN_URL" | grep -qE "^[^@]+@[^:]+:[^/]+/"; then
-    # Git format: git@host:PROJECT/repo.git
-    BB_HOST=$(echo "$ORIGIN_URL" | sed -E 's|^[^@]+@([^:]+):.*|https://\1|')
-    BB_PROJECT=$(echo "$ORIGIN_URL" | sed -E 's|^[^@]+@[^:]+:([^/]+)/.*|\1|')
-    BB_REPO=$(echo "$ORIGIN_URL" | sed -E 's|^[^@]+@[^:]+:[^/]+/([^/]+)(\.git)?$|\1|')
+# Prefer repos.csv path column (set by pull-requests.sh from repos.csv)
+# This avoids fragile URL parsing across SSH, HTTPS, SCP, and /scm/ variants
+if [ -n "${REPO_PATH:-}" ] && [ -n "${REPO_ORIGIN:-}" ]; then
+    BB_HOST="https://$REPO_ORIGIN"
+    BB_PROJECT=$(echo "$REPO_PATH" | cut -d'/' -f1)
+    BB_REPO=$(echo "$REPO_PATH" | cut -d'/' -f2)
 fi
 
-# Remove .git suffix if present
-BB_REPO="${BB_REPO%.git}"
-
 if [ -z "$BB_HOST" ] || [ -z "$BB_PROJECT" ] || [ -z "$BB_REPO" ]; then
-    echo "  ERROR: Could not parse Bitbucket URL: $ORIGIN_URL"
-    echo "  Expected formats:"
-    echo "    https://host/scm/PROJECT/repo.git"
-    echo "    https://host/projects/PROJECT/repos/repo"
-    echo "    ssh://git@host/PROJECT/repo.git"
-    echo "    git@host:PROJECT/repo.git"
+    echo "  ERROR: Could not determine Bitbucket project/repo"
+    echo "  Ensure repos.csv has 'path' column with PROJECT/repo (e.g., FOO/bar)"
+    echo "  Origin URL: $ORIGIN_URL"
     exit 1
 fi
 

@@ -422,6 +422,8 @@ if [ "$CREATE_PRS" = "true" ]; then
         export PR_BODY="${PR_BODY:-}"
         export BRANCH_NAME
         export SCM_MAPPING_CSV
+        # Make REPOS_CSV_LOCATION absolute so PR scripts can look up origin/path columns
+        export REPOS_CSV_LOCATION="$(realpath "$REPOS_CSV_LOCATION")"
 
         # Use mod exec to run pull-requests.sh in each repo that had changes
         # This properly handles the nested org structure (./repos/ALL/kmccarp/repo-name)
