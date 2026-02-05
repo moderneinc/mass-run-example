@@ -207,10 +207,11 @@ if [ -n "$RECIPES_CSV_LOCATION" ]; then
         curl -f -s -o "$MODERNE_CLI_DIR/recipes-v5.csv" "$RECIPES_CSV_LOCATION"
         echo "  -> Downloaded to $MODERNE_CLI_DIR/recipes-v5.csv"
     else
-        echo "  -> Copying recipes-v5.csv to $MODERNE_CLI_DIR/..."
+        echo "  -> Copying recipes-v5.csv from $RECIPES_CSV_LOCATION to $MODERNE_CLI_DIR/..."
         cp "$RECIPES_CSV_LOCATION" "$MODERNE_CLI_DIR/recipes-v5.csv"
         echo "  -> Copied to $MODERNE_CLI_DIR/recipes-v5.csv"
     fi
+    echo "  -> Verifying: $(wc -l < "$MODERNE_CLI_DIR/recipes-v5.csv") lines in $MODERNE_CLI_DIR/recipes-v5.csv"
 else
     echo "=== No recipes-v5.csv configured ==="
     echo "  -> Recipes will be loaded from Moderne tenant (if configured)"

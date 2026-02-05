@@ -55,12 +55,35 @@ RUN if [ -n "${MODERNE_CLI_VERSION}" ]; then \
             echo "Failed to get latest stable version"; \
             exit 1; \
         fi; \
+        # Minimum CLI version required for recipes-v5.csv support \
+        MIN_CLI_VERSION="3.55.0"; \
+        MAJOR=$(echo "$LATEST_VERSION" | cut -d. -f1); \
+        MINOR=$(echo "$LATEST_VERSION" | cut -d. -f2); \
+        PATCH=$(echo "$LATEST_VERSION" | cut -d. -f3 | cut -d- -f1); \
+        MIN_MAJOR=$(echo "$MIN_CLI_VERSION" | cut -d. -f1); \
+        MIN_MINOR=$(echo "$MIN_CLI_VERSION" | cut -d. -f2); \
+        MIN_PATCH=$(echo "$MIN_CLI_VERSION" | cut -d. -f3); \
+        if [ "$MAJOR" -lt "$MIN_MAJOR" ] || \
+           ([ "$MAJOR" -eq "$MIN_MAJOR" ] && [ "$MINOR" -lt "$MIN_MINOR" ]) || \
+           ([ "$MAJOR" -eq "$MIN_MAJOR" ] && [ "$MINOR" -eq "$MIN_MINOR" ] && [ "$PATCH" -lt "$MIN_PATCH" ]); then \
+            echo ""; \
+            echo "ERROR: Latest stable CLI version ($LATEST_VERSION) is older than required minimum ($MIN_CLI_VERSION)."; \
+            echo ""; \
+            echo "The Moderne CLI requires version $MIN_CLI_VERSION or later for recipes-v5.csv support."; \
+            echo ""; \
+            echo "Options:"; \
+            echo "  1. Use staging: docker build --build-arg MODERNE_CLI_STAGE=staging ..."; \
+            echo "  2. Specify a version: docker build --build-arg MODERNE_CLI_VERSION=3.55.0 ..."; \
+            echo ""; \
+            exit 1; \
+        fi; \
         echo "Downloading latest stable version: ${LATEST_VERSION}"; \
         curl -f -s --insecure --request GET --url "https://repo1.maven.org/maven2/io/moderne/moderne-cli/${LATEST_VERSION}/moderne-cli-${LATEST_VERSION}.jar" --output /usr/local/bin/mod.jar; \
     fi
 
 # Create mod wrapper script (same pattern as mass-ingest)
-RUN echo -e '#!/bin/sh\njava -jar /usr/local/bin/mod.jar "$@"' > /usr/local/bin/mod && \
+# Use printf instead of echo -e for POSIX compatibility (dash doesn't support echo -e)
+RUN printf '#!/bin/sh\njava -jar /usr/local/bin/mod.jar "$@"\n' > /usr/local/bin/mod && \
     chmod +x /usr/local/bin/mod
 
 # Verify mod CLI is working
