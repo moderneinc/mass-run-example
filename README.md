@@ -1,85 +1,182 @@
 # Mass Run
 
-This example demonstrates how to use the [Moderne CLI](https://docs.moderne.io/user-documentation/moderne-cli/getting-started/cli-intro) to run recipes on all organizations (collection of repositories) using the Moderne platform.
+Run [OpenRewrite](https://docs.openrewrite.org/) recipes across repositories at scale using the [Moderne CLI](https://docs.moderne.io/user-documentation/moderne-cli/getting-started/cli-intro).
 
-## Step 1: Customize the Docker image
+## Overview
 
-Begin by copying the [provided Dockerfile](/Dockerfile) to your environment or cloning this entire repository.
+Mass-run executes recipes against pre-built LSTs (Lossless Semantic Trees) from [mass-ingest](https://github.com/moderneinc/mass-ingest-example) and produces:
+- **Data tables** - Structured analysis results from the recipe
+- **Patches** - Code changes that can be applied to repositories
+- **Logs** - Detailed execution logs for debugging
+- **Pull requests** - Optionally create PRs for code changes
 
-From there, we will modify it depending on your organizational needs. Please note that the process requires access to several of your internal systems to function correctly. This includes your source control system, your artifact repository, and your Moderne tenant or DX instance.
+## Deployment Options
 
-### Self-Signed Certificates
+Choose the deployment option that fits your needs:
 
-If your internal services (artifact repository, source control, or the Moderne tenant) are accessed:
+| Option | Description | Best For |
+|--------|-------------|----------|
+| [1-quickstart](./1-quickstart/) | Single container, no monitoring | Development, testing, small deployments |
+| [2-observability](./2-observability/) | Docker Compose with Grafana/Prometheus | Production single-host deployments |
 
-* Over HTTPS and they require [SSL/TLS](https://en.wikipedia.org/wiki/Transport_Layer_Security), but have certificates signed by a trusted-by-default root Certificate Authority.
-* Over HTTP (never requiring SSL/TLS)
+## Quick Start
 
-Please comment out the following lines from your Dockerfile:
-
-```Dockerfile
-# Configure trust store if self-signed certificates are in use for artifact repository, source control, or moderne tenant
-COPY ${TRUSTED_CERTIFICATES_PATH} /usr/lib/jvm/temurin-17-jdk/lib/security/cacerts
-```
-
-If your internal services, instead, use self-signed certs, you will need to configure the CLI and JVMs installed within the Docker image to trust your organization's self-signed certificate:
-
-When invoking, Docker, supply the `TRUSTED_CERTIFICATES_PATH` argument pointing to an appropriate [cacerts file](https://www.ibm.com/docs/en/sdk-java-technology/8?topic=certificate-cacerts-certificates-file).
-
-If you are not sure where to get a suitable cacerts file, you can check out your local machine as you probably have one there. On JDK 8, you can find your cacerts file within its installation directory under `jre/lib/security/cacerts`. On newer JDK versions, you can find your cacerts file within is installation directory under `lib/security/cacerts`.
-
-### Artifact repository
-
-The CLI needs access to artifact repositories to download the LSTs which we will run recipes on. This is configured via the `ARTIFACTORY_DOWNLOAD_URL`, `ARTIFACTORY_UPLOAD_URL`, `ARTIFACTORY_USER`, and `ARTIFACTORY_PASSWORD` [arguments in the Dockerfile](/Dockerfile#L35-L37).
-
-`ARTIFACTORY_DOWNLOAD_URL` should point to where the LSTs are stored.
-`ARTIFACTORY_UPLOAD_URL` should point to where you want the run logs to be uploaded.
-
-### Source Control Credentials
-
-Most source control systems require authentication to access their repositories. If your source control **does not** require authentication to `git clone` repositories, comment out the [following lines](/Dockerfile#L35-L36):
-
-```Dockerfile
-ADD .git-credentials /root/.git-credentials
-RUN git config --global credential.helper store --file=/root/.git-credentials
-```
-
-In the more common scenario that your source control does require authentication, you will need to create and include a `.git-credentials` file. You will want to supply the credentials for a service account with access to all repositories.
-
-Each line of the `.git-credentials` file specifies the `username` and plaintext `password` for a particular `host` in the format:
-
-```
-https://username:password@host
-```
-
-For example:
-
-```
-https://sambsnyd:likescats@github.com
-```
-
-### Moderne Tenant or DX instance
-
-Connection to a Moderne tenant allows the CLI to list LSTs for downloading and get information about your organization. The `MODERNE_TENANT` and `MODERNE_TOKEN` arguments are required to connect to a Moderne tenant.
-
-If you are connecting to a Moderne DX instance, you will need to provide the token it was configured to accept on startup. If you are connecting to a Moderne tenant, you will need to create and use a [Moderne personal access token](https://docs.moderne.io/user-documentation/moderne-platform/how-to-guides/create-api-access-tokens).
-
-## Step 3: Build the Docker image
-
-Once you've customized the `Dockerfile` as needed, you can build the image with the following command, filling in your organization's specific values for the build arguments:
+### 1-quickstart
 
 ```bash
-docker build -t moderne-mass-run:latest \
-    --build-arg MODERNE_TENANT=<> \
-    --build-arg MODERNE_TOKEN=<> \
-    --build-arg TRUSTED_CERTIFICATES_PATH=<> \
-    --build-arg ARTIFACTORY_DOWNLOAD_URL=<> \
-    --build-arg ARTIFACTORY_UPLOAD_URL=<> \
-    --build-arg ARTIFACTORY_USER=<> \
-    --build-arg ARTIFACTORY_PASSWORD=<> \
-    .
+# Build
+docker build -t mass-run:quickstart .
+
+# Run a search recipe
+docker run --rm \
+  -e REPOS_CSV_LOCATION=/app/repos.csv \
+  -e RECIPE=org.openrewrite.java.search.FindTypes \
+  -e OUTPUT_LOCATION=s3://your-bucket/output \
+  -e MODERNE_LICENSE_KEY="your-license-key" \
+  -v $(pwd)/repos.csv:/app/repos.csv:ro \
+  -v ~/.aws:/root/.aws:ro \
+  mass-run:quickstart
 ```
 
-## Step 4: Deploy and run the image
+### 2-observability
 
-Now that you have a Docker image built, you will need to deploy it to the container management platform of your choice and have it run on a schedule. We will leave this as an exercise for the reader as there are many platforms and options for running this.
+```bash
+cd 2-observability
+
+# Configure
+cp .env.example .env
+# Edit .env with your settings
+
+# Copy your repos.csv
+cp /path/to/repos.csv ./repos.csv
+
+# Start
+docker compose up -d
+
+# Access dashboards at http://localhost:3000 (admin/admin)
+```
+
+## Configuration Files
+
+### repos.csv
+
+Defines the repositories to run recipes against. See the [repos.csv documentation](https://docs.moderne.io/user-documentation/moderne-cli/references/repos-csv/).
+
+```csv
+cloneUrl,branch,origin,path,publishUri
+https://github.com/org/repo1.git,main,github.com,org/repo1,s3://lst-bucket/org/repo1
+https://github.com/org/repo2.git,main,github.com,org/repo2,s3://lst-bucket/org/repo2
+```
+
+- `publishUri` - where the pre-built LST is stored (from mass-ingest)
+- `origin` and `path` - **required for PR creation**; used to identify the project/repo on the SCM host
+
+### scm-mapping.csv
+
+**Required for PR creation.** Maps repository hosts to their SCM types:
+
+```csv
+origin,scmType
+github.com,GitHub
+bitbucket.example.com,BitbucketDataCenter
+github.mycompany.com,GitHub
+```
+
+Supported SCM types:
+- `GitHub` - GitHub.com and GitHub Enterprise
+- `BitbucketDataCenter` - Bitbucket Server/Data Center
+
+### .git-credentials
+
+For private repositories and PR creation, mount a `.git-credentials` file:
+
+```
+https://username:token@github.com
+https://username:token@bitbucket.example.com
+```
+
+## Environment Variables
+
+### Required
+
+| Variable             | Description                                      |
+|----------------------|--------------------------------------------------|
+| `REPOS_CSV_LOCATION` | Path or S3 URL to repos.csv                      |
+| `RECIPE`             | Recipe ID to run                                 |
+| `OUTPUT_LOCATION`    | S3 path for output artifacts                     |
+
+### License (Runtime Configuration)
+
+| Variable              | Description                                     |
+|-----------------------|-------------------------------------------------|
+| `MODERNE_LICENSE_KEY` | License key (passed at runtime, not build time) |
+
+### Moderne Tenant
+
+| Variable          | Description                                         |
+|-------------------|-----------------------------------------------------|
+| `MODERNE_TOKEN`   | Moderne API token                                   |
+| `MODERNE_TENANT`  | Moderne tenant URL (default: https://app.moderne.io)|
+
+### Recipe Execution
+
+| Variable          | Description                                         |
+|-------------------|-----------------------------------------------------|
+| `RECIPE_OPTIONS`  | Recipe options (e.g., `-Pfoo=bar -Pbaz=bop`)        |
+| `RECIPE_TIMEOUT`  | Timeout in seconds for recipe execution (0 = none)  |
+| `ORGANIZATION`    | Organization name for syncing repos                 |
+
+### PR Creation
+
+| Variable          | Description                                         |
+|-------------------|-----------------------------------------------------|
+| `CREATE_PRS`      | Set to `true` to create PRs                         |
+| `SCM_MAPPING_CSV` | Path to scm-mapping.csv (required for PR creation)  |
+| `PR_TITLE`        | PR title                                            |
+| `PR_BODY`         | PR description                                      |
+| `BRANCH_NAME`     | Branch name (default: `moderne/<recipe-suffix>`)    |
+| `COMMIT_MESSAGE`  | Commit message                                      |
+
+### S3 Configuration
+
+| Variable      | Description                             |
+|---------------|-----------------------------------------|
+| `LST_BUCKET`  | S3 bucket for pre-built LSTs            |
+| `S3_ENDPOINT` | S3-compatible endpoint (e.g., MinIO)    |
+| `S3_REGION`   | AWS region                              |
+| `S3_PROFILE`  | AWS profile name                        |
+
+## Output Artifacts
+
+After execution, these artifacts are uploaded to `OUTPUT_LOCATION/<timestamp>/`:
+
+| Artifact          | Description                                  |
+|-------------------|----------------------------------------------|
+| `data-tables.zip` | CSV data tables from recipe execution        |
+| `patches.zip`     | Patch files for each repository with changes |
+| `runs.zip`        | Recipe execution logs                        |
+| `cli-output.txt`  | Full CLI command output                      |
+| `pr-logs.zip`     | PR creation logs (if PRs were created)       |
+| `summary.txt`     | Execution summary                            |
+
+## Build Arguments
+
+| Argument               | Default  | Description                              |
+|------------------------|----------|------------------------------------------|
+| `MODERNE_CLI_VERSION`  | (latest) | Pin to specific CLI version              |
+| `MODERNE_CLI_STAGE`    | `stable` | `stable` or `staging` (for pre-releases) |
+
+Example:
+```bash
+# Specific version
+docker build --build-arg MODERNE_CLI_VERSION=3.50.0 -t mass-run:quickstart .
+
+# Staging builds
+docker build --build-arg MODERNE_CLI_STAGE=staging -t mass-run:quickstart .
+```
+
+## Related Projects
+
+- [mass-ingest-example](https://github.com/moderneinc/mass-ingest-example) - Build LSTs at scale
+- [Moderne CLI](https://docs.moderne.io/user-documentation/moderne-cli/getting-started/cli-intro) - Command-line interface
+- [OpenRewrite](https://docs.openrewrite.org/) - Recipe ecosystem

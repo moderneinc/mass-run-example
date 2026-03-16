@@ -1,7 +1,0 @@
-Default
-Moderne
-Netflix
-Spring
-Apache
-OpenRewrite
-Jenkins CI
