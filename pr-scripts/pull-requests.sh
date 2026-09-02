@@ -173,6 +173,7 @@ if [ -z "$SCM_TYPE" ]; then
     echo ""
     echo "  Supported SCM types:"
     echo "    - GitHub"
+    echo "    - GitLab"
     echo "    - BitbucketDataCenter"
     exit 1
 fi
@@ -246,13 +247,17 @@ case "$SCM_TYPE" in
         echo "  Calling: github-pr.sh"
         "$SCRIPT_DIR/github-pr.sh" "$ORIGIN_URL" "$TARGET_BRANCH"
         ;;
+    GitLab)
+        echo "  Calling: gitlab-pr.sh"
+        "$SCRIPT_DIR/gitlab-pr.sh" "$ORIGIN_URL" "$TARGET_BRANCH"
+        ;;
     BitbucketDataCenter)
         echo "  Calling: bitbucket-data-center-pr.sh"
         "$SCRIPT_DIR/bitbucket-data-center-pr.sh" "$ORIGIN_URL" "$TARGET_BRANCH"
         ;;
     *)
         echo "ERROR: Unsupported SCM type: $SCM_TYPE"
-        echo "  Supported types: GitHub, BitbucketDataCenter"
+        echo "  Supported types: GitHub, GitLab, BitbucketDataCenter"
         exit 1
         ;;
 esac

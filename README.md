@@ -78,12 +78,14 @@ https://github.com/org/repo2.git,main,github.com,org/repo2,s3://lst-bucket/org/r
 ```csv
 origin,scmType
 github.com,GitHub
+gitlab.com,GitLab
 bitbucket.example.com,BitbucketDataCenter
 github.mycompany.com,GitHub
 ```
 
 Supported SCM types:
 - `GitHub` - GitHub.com and GitHub Enterprise
+- `GitLab` - GitLab.com and self-managed GitLab
 - `BitbucketDataCenter` - Bitbucket Server/Data Center
 
 ### .git-credentials
@@ -92,6 +94,7 @@ For private repositories and PR creation, mount a `.git-credentials` file:
 
 ```
 https://username:token@github.com
+https://username:token@gitlab.com
 https://username:token@bitbucket.example.com
 ```
 
