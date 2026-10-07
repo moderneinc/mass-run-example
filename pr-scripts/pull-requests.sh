@@ -132,7 +132,8 @@ fi
 # Look up repo path from repos.csv (avoids fragile URL parsing)
 # =============================================================================
 # repos.csv may have origin and path columns (e.g., origin=github.com, path=org/repo)
-# The path column maps directly to owner/repo (GitHub) or project/repo (Bitbucket)
+# The path column maps directly to owner/repo (GitHub), project/repo (Bitbucket),
+# or group/[subgroup/]repo (GitLab)
 REPO_PATH=""
 if [ -n "${REPOS_CSV_LOCATION:-}" ] && [ -f "${REPOS_CSV_LOCATION}" ]; then
     # Find the "path" column index from header
@@ -152,6 +153,7 @@ fi
 #   origin,scmType
 #   github.com,GitHub
 #   bitbucket.example.com,BitbucketDataCenter
+#   gitlab.example.com,GitLab
 lookup_scm_type() {
     local host="$1"
     local mapping_file="$2"
@@ -174,6 +176,7 @@ if [ -z "$SCM_TYPE" ]; then
     echo "  Supported SCM types:"
     echo "    - GitHub"
     echo "    - BitbucketDataCenter"
+    echo "    - GitLab"
     exit 1
 fi
 
@@ -250,9 +253,13 @@ case "$SCM_TYPE" in
         echo "  Calling: bitbucket-data-center-pr.sh"
         "$SCRIPT_DIR/bitbucket-data-center-pr.sh" "$ORIGIN_URL" "$TARGET_BRANCH"
         ;;
+    GitLab)
+        echo "  Calling: gitlab-pr.sh"
+        "$SCRIPT_DIR/gitlab-pr.sh" "$ORIGIN_URL" "$TARGET_BRANCH"
+        ;;
     *)
         echo "ERROR: Unsupported SCM type: $SCM_TYPE"
-        echo "  Supported types: GitHub, BitbucketDataCenter"
+        echo "  Supported types: GitHub, BitbucketDataCenter, GitLab"
         exit 1
         ;;
 esac

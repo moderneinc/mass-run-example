@@ -42,12 +42,14 @@ The `origin` and `path` columns are required for PR creation (used to identify t
 origin,scmType
 github.com,GitHub
 bitbucket.example.com,BitbucketDataCenter
+gitlab.example.com,GitLab
 ```
 
 **.git-credentials** - For private repositories and PR creation:
 ```
 https://username:token@github.com
 https://username:token@bitbucket.example.com
+https://oauth2:glpat-token@gitlab.example.com
 ```
 
 > **Note:** PR creation requires HTTPS credentials in `.git-credentials` even if you use SSH keys for git operations. The PR scripts use REST API calls that need a token for authentication.
