@@ -5,9 +5,9 @@
 # Supported SCM types:
 #   - GitHub           (for github.com and GitHub Enterprise)
 #   - BitbucketDataCenter (for Bitbucket Server/Data Center)
+#   - GitLab           (for gitlab.com and self-managed GitLab)
 #
 # Coming soon:
-#   - GitLab
 #   - AzureDevOps
 #   - BitbucketCloud
 #
@@ -19,4 +19,5 @@
 #   github.com,GitHub
 #   bitbucket.mycompany.com,BitbucketDataCenter
 #   github.mycompany.com,GitHub
+#   gitlab.mycompany.com,GitLab
 origin,scmType

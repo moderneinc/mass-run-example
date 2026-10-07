@@ -80,11 +80,13 @@ origin,scmType
 github.com,GitHub
 bitbucket.example.com,BitbucketDataCenter
 github.mycompany.com,GitHub
+gitlab.example.com,GitLab
 ```
 
 Supported SCM types:
 - `GitHub` - GitHub.com and GitHub Enterprise
 - `BitbucketDataCenter` - Bitbucket Server/Data Center
+- `GitLab` - GitLab.com and self-managed GitLab (creates merge requests; `path` may include nested groups)
 
 ### .git-credentials
 
@@ -93,6 +95,7 @@ For private repositories and PR creation, mount a `.git-credentials` file:
 ```
 https://username:token@github.com
 https://username:token@bitbucket.example.com
+https://oauth2:glpat-token@gitlab.example.com
 ```
 
 ## Environment Variables
